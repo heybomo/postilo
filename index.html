@@ -110,6 +110,10 @@ input[type=range]::-moz-range-thumb{width:23px;height:23px;border:0;border-radiu
 .bar{width:min(240px,80%);height:6px;border-radius:3px;background:rgba(255,255,255,.25);overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--violet),var(--blue),var(--cyan))}
 .busy button{margin-top:4px;padding:10px 18px;border:1px solid rgba(255,255,255,.55);border-radius:10px;color:#fff;font-weight:600}
+.busy .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.busy .acts button{margin-top:0}
+.busy .primary{background:linear-gradient(115deg,var(--violet),var(--blue) 45%,var(--cyan));border-color:transparent}
+.busy .acts[hidden],.busy .bar[hidden],.busy button[hidden]{display:none}
 .exporting .formats,.exporting .controls,.exporting .btn,.exporting .zoom,.exporting .vbar,.exporting .theme{pointer-events:none;opacity:.5}
 
 /* ---------- настройки — прокручиваются ---------- */
@@ -206,9 +210,13 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
       </div>
       <div class="busy" id="busy" hidden role="status" aria-live="polite">
         <strong id="busyTitle">Сохраняем видео</strong>
-        <div class="bar"><i id="barFill"></i></div>
+        <div class="bar" id="busyBar"><i id="barFill"></i></div>
         <span id="busyTxt">Не сворачивайте страницу и не блокируйте экран</span>
         <button type="button" id="cancelBtn">Отмена</button>
+        <div class="acts" id="doneActs" hidden>
+          <button type="button" id="doneSave" class="primary">Сохранить видео</button>
+          <button type="button" id="doneClose">Закрыть</button>
+        </div>
       </div>
     </div>
   </main>
@@ -276,8 +284,8 @@ var EDGE_GAP = 46;    // от внутренней кромки рамки до 
 var TOP_W    = 0.05;  // высота верхнего ряда: логотип и метка рубрики ОДНОЙ высоты
 var SRC_W    = 0.026; // кегль строки источника (не мельче 28 px при 1080)
 var WM_ALPHA = 0.10;  // прозрачность водяного знака
-var MAX_VIDEO_SEC = 120;   // длиннее не берём: запись идёт в реальном времени и хранится в памяти
-var VIDEO_BPS = 6000000;   // битрейт записи, бит/с
+var MAX_VIDEO_SEC = 300;   // 5 минут. Длиннее не берём: запись идёт в реальном времени и хранится в памяти
+function videoBps(sec){ return sec>120?4000000:6000000; }   // до 2 минут — 6 Мбит/с, дольше — 4, чтобы файл не раздувался
 var PLATE_SIZES = [52,64,78,94];   // кегль заголовка на плашке, px при ширине 1080
 var PLATE_NAMES = ["S","M","L","XL"];
 var PALETTE = [["Чёрный","#0B0B0B"],["Синий","#0077FF"],["Фиолетовый","#5A007E"],["Бордовый","#660047"]];
@@ -300,7 +308,7 @@ var RUBRICS=["Политика","Общество","Происшествия","�
 var K="soyuzny.kadr.";
 var cur=FORMATS[0], rubric=RUBRICS[0], source="";
 var photo=null, logo=null, areaH=1350;
-var isVideo=false, vid=null, overlayCache=null, exporting=false, loopOn=false, loopTok=0;
+var isVideo=false, vid=null, overlayCache=null, exporting=false, loopOn=false, loopTok=0, leadStill=null;
 var wmOn=false, plateOn=false, align="left", sizeIdx=1;
 var view={scale:1,x:0,y:0}, busy=false;
 
@@ -647,13 +655,14 @@ function renderVideoFrame(){
   if(cv.width!==W||cv.height!==H){ cv.width=W; cv.height=H; }
   var ov=getOverlay(); areaH=ov.PH;
   ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha=1;
-  var hasFrame=photo&&photo.readyState>=2;
+  var src=leadStill||photo;                       // leadStill — первый кадр ролика на старте записи
+  var hasFrame=!!src&&(leadStill?true:photo.readyState>=2);
   if(!hasFrame){ ctx.fillStyle="#000"; ctx.fillRect(0,0,W,H); }   // кадр ещё не пришёл
   if(hasFrame){
     ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,ov.PH); ctx.clip();
     clamp();
     var s=coverBase()*view.scale, pw=sw(photo)*s, ph=sh(photo)*s;
-    ctx.drawImage(photo,(W-pw)/2+view.x,(ov.PH-ph)/2+view.y,pw,ph);
+    ctx.drawImage(src,(W-pw)/2+view.x,(ov.PH-ph)/2+view.y,pw,ph);
     ctx.restore();
   }
   ctx.drawImage(ov.canvas,0,0);
@@ -802,6 +811,9 @@ function useImage(i){
 
 /* ---------- видео ---------- */
 var busyEl=document.getElementById("busy");
+/* Кнопки на панели записи лежат внутри кадра. Без этого нажатие на них попадало бы в перетаскивание фото,
+   которое «захватывает» указатель — и клик уходил бы на сам кадр, а не на кнопку. */
+busyEl.addEventListener("pointerdown",function(e){ e.stopPropagation(); });
 var playBtn=document.getElementById("playBtn"), seek=document.getElementById("seek"), vTime=document.getElementById("vTime");
 var scrubbing=false, AC=null, exp=null;
 
@@ -839,6 +851,12 @@ function explainVideo(f,e){
   if(f.size===0) return "Файл пустой. Если он лежит в облаке, сначала скачайте его на устройство";
   return "Браузер не смог прочитать это видео. Чаще всего дело в формате (например, HEVC с айфона на компьютере). Откройте страницу на айфоне или пересохраните ролик в MP4 (H.264)";
 }
+function grabStill(v){                           // первый кадр ролика — понадобится на старте записи
+  if(v._still||v.readyState<2||v.currentTime>0.3||!v.videoWidth) return;
+  var sc=Math.min(1,1920/Math.max(v.videoWidth,v.videoHeight));
+  var c=document.createElement("canvas"); c.width=Math.round(v.videoWidth*sc); c.height=Math.round(v.videoHeight*sc);
+  try{ c.getContext("2d").drawImage(v,0,0,c.width,c.height); v._still=c; }catch(e){}
+}
 function useVideo(v){
   stopLoop(); if(vid&&vid!==v){ try{vid.pause()}catch(e){} }
   var old=document.getElementById("vidEl"); if(old&&old!==v&&old.parentNode) old.parentNode.removeChild(old);
@@ -846,8 +864,8 @@ function useVideo(v){
   v.onplay=function(){ syncPlay(); if(!exporting) startLoop() };
   v.onpause=function(){ syncPlay(); if(!exporting){ stopLoop(); render(); updateSeek() } };
   v.onended=function(){ syncPlay(); if(!exporting){ stopLoop(); render(); updateSeek() } };
-  v.onseeked=function(){ if(!exporting&&v.paused) render(); updateSeek() };
-  syncPlay(); updateSeek();
+  v.onseeked=function(){ grabStill(v); if(!exporting&&v.paused) render(); updateSeek() };
+  grabStill(v); syncPlay(); updateSeek();
 }
 
 /* воспроизведение в предпросмотре */
@@ -895,74 +913,29 @@ function startLoop(){ loopOn=true; loopTok++; schedule(loopTok); }
 function stopLoop(){ loopOn=false; loopTok++; }
 
 /* ---------- запись видео с рамкой ---------- */
+var BUSY_NOTE="Не сворачивайте страницу и не блокируйте экран";
+var busyNote=BUSY_NOTE;
 function setBar(f){
-  var p=Math.round(Math.max(0,Math.min(1,f||0))*100);
+  var fr=Math.max(0,Math.min(1,f||0)), p=Math.round(fr*100);
   document.getElementById("barFill").style.width=p+"%";
   document.getElementById("busyTitle").textContent="Сохраняем видео · "+p+"%";
+  var rem=(vid&&isFinite(vid.duration))?vid.duration*(1-fr):0;
+  document.getElementById("busyTxt").textContent=(rem>=1?"Осталось "+fmtTime(rem)+". ":"")+busyNote;
 }
 var IS_SAFARI=/safari/i.test(navigator.userAgent)&&!/chrome|chromium|crios|fxios|edg|android/i.test(navigator.userAgent);
+/* Только MP4 (H.264 + AAC). Простое «video/mp4» без кодеков берём лишь в Safari: в Chrome оно
+   может дать файл вообще без видеодорожки. В Chrome сначала avc3 — для него браузер не требует
+   неизменного описания кодека посреди записи. WebM не пишем вовсе. */
 function pickMime(){
   if(!window.MediaRecorder||!MediaRecorder.isTypeSupported) return "";
-  var mp4=["video/mp4;codecs=avc1.42E01E,mp4a.40.2","video/mp4;codecs=avc1","video/mp4"];
-  var webm=["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"];
-  /* Safari (в том числе на iPhone) пишет только MP4 — и это то, что нужно Фото и мессенджерам.
-     В Chrome и Firefox надёжнее WebM: MP4 там зависит от кодировщика в системе и иногда получается битым. */
-  var list=(IS_IOS||IS_SAFARI)?mp4.concat(webm):webm.concat(mp4);
+  var list=(IS_IOS||IS_SAFARI)
+    ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2","video/mp4;codecs=avc1,mp4a.40.2","video/mp4"]
+    : ["video/mp4;codecs=avc3.42E01E,mp4a.40.2","video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+       "video/mp4;codecs=avc3,mp4a.40.2","video/mp4;codecs=avc1,mp4a.40.2",
+       "video/mp4;codecs=avc3","video/mp4;codecs=avc1"];
   for(var i=0;i<list.length;i++){ if(MediaRecorder.isTypeSupported(list[i])) return list[i]; }
   return "";
 }
-/* MediaRecorder в Chrome пишет WebM без длительности: плееры и площадки показывают «0:00».
-   Дописываем её в заголовок (Info → Duration). Если структура файла незнакомая — отдаём как есть. */
-function readHead(blob,n){
-  var part=blob.slice(0,n);
-  if(part.arrayBuffer) return part.arrayBuffer();
-  return new Promise(function(res,rej){ var r=new FileReader(); r.onload=function(){res(r.result)}; r.onerror=rej; r.readAsArrayBuffer(part); });
-}
-function fixWebmDuration(blob,durMs){
-  return readHead(blob,4096).then(function(ab){
-    var b=new Uint8Array(ab);
-    function vint(i,keep){
-      var first=b[i]; if(!first) return null;
-      var n=1,m=0x80; while(!(first&m)){m>>=1;n++}
-      var v=keep?first:(first&(m-1)), ones=((first&(m-1))===(m-1));
-      for(var k=1;k<n;k++){ if(b[i+k]===undefined) return null; v=v*256+b[i+k]; if(b[i+k]!==0xFF) ones=false; }
-      return {v:v,n:n,unk:ones};
-    }
-    var i=0, id=vint(i,true), sz;
-    if(!id||id.v!==0x1A45DFA3) return blob;                     // заголовок EBML
-    sz=vint(i+id.n,false); if(!sz) return blob; i+=id.n+sz.n+sz.v;
-    id=vint(i,true); if(!id||id.v!==0x18538067) return blob;    // Segment
-    sz=vint(i+id.n,false); if(!sz||!sz.unk) return blob;        // берёмся только за сегмент без указанной длины
-    var p=i+id.n+sz.n, infoStart=-1;
-    while(p<b.length-8){
-      var cid=vint(p,true), csz=cid&&vint(p+cid.n,false);
-      if(!cid||!csz||csz.unk||cid.v===0x1F43B675) return blob;
-      if(cid.v===0x1549A966){ infoStart=p; break; }
-      p+=cid.n+csz.n+csz.v;
-    }
-    if(infoStart<0) return blob;
-    var iid=vint(infoStart,true), isz=vint(infoStart+iid.n,false);
-    var ps=infoStart+iid.n+isz.n, pe=ps+isz.v;
-    if(pe>b.length) return blob;
-    var q=ps, scale=1000000;
-    while(q<pe){
-      var eid=vint(q,true), esz=eid&&vint(q+eid.n,false);
-      if(!eid||!esz) return blob;
-      if(eid.v===0x4489) return blob;                            // длительность уже есть
-      if(eid.v===0x2AD7B1){ var t=0; for(var k=0;k<esz.v;k++) t=t*256+b[q+eid.n+esz.n+k]; if(t) scale=t; }
-      q+=eid.n+esz.n+esz.v;
-    }
-    var newSize=isz.v+11;
-    if(newSize>Math.pow(2,7*isz.n)-2) return blob;
-    var sizeBytes=new Uint8Array(isz.n), val=newSize;
-    for(var j=isz.n-1;j>=0;j--){ sizeBytes[j]=val%256; val=Math.floor(val/256); }
-    sizeBytes[0]|=(0x80>>(isz.n-1));
-    var dur=new Uint8Array(11); dur[0]=0x44; dur[1]=0x89; dur[2]=0x88;
-    var dv=new DataView(dur.buffer); dv.setFloat64(3,durMs*1e6/scale);
-    return new Blob([b.slice(0,infoStart+iid.n),sizeBytes,b.slice(ps,pe),dur,blob.slice(pe)],{type:blob.type});
-  }).catch(function(){ return blob; });
-}
-function extFor(t){ return /mp4/i.test(t)?".mp4":".webm"; }
 function audioFor(v){                        // звук ролика — через Web Audio (в Safari captureStream у видео нет)
   var Ctor=window.AudioContext||window.webkitAudioContext; if(!Ctor) return null;
   if(!AC) AC=new Ctor();
@@ -973,6 +946,7 @@ function onHidden(){
   if(document.hidden&&exp) cancelExport("Запись прервана: страница ушла в фон. Не сворачивайте её, пока идёт сохранение");
 }
 function endExport(){
+  leadStill=null;
   exporting=false; document.body.classList.remove("exporting"); busyEl.hidden=true;
   stopLoop();
   if(exp){
@@ -995,9 +969,13 @@ function cancelExport(msg){
 function exportVideo(){
   if(exporting||!isVideo||!vid) return;
   if(!window.MediaRecorder||!cv.captureStream){
-    toast("Этот браузер не умеет записывать видео. Откройте страницу в Chrome или Safari",7000); return;
+    toast("Этот браузер не умеет записывать видео. Откройте страницу в Chrome или Safari",7500); return;
   }
   var mime=pickMime(), chunks=[], stream, rec, aTracks=[];
+  if(!mime){
+    toast("Этот браузер не умеет сохранять видео в MP4. Откройте страницу в Chrome или Safari на телефоне или компьютере",8500); return;
+  }
+  hideDone(); busyNote=BUSY_NOTE;
   exp={cancelled:false,wake:null,onEnded:null,rec:null};
   exporting=true; document.body.classList.add("exporting");
   busyEl.hidden=false; setBar(0);
@@ -1008,33 +986,30 @@ function exportVideo(){
     if(dest){ aTracks=dest.stream.getAudioTracks(); if(AC.state==="suspended") AC.resume(); }
     else audioFail=true;
   }catch(e){ console.warn("Звук недоступен:",e); audioFail=true; }
-  if(audioFail) document.getElementById("busyTxt").textContent="Звук в этом браузере записать не получится: видео сохранится без звука. Не сворачивайте страницу";
+  if(audioFail){ busyNote="Звук в этом браузере записать не получится: видео сохранится без звука. Не сворачивайте страницу"; setBar(0); }
   vid.muted=false; vid.volume=1;              // наружу звук не выводится: он идёт только в запись
   renderVideoFrame();
   stream=cv.captureStream(30);
   aTracks.forEach(function(t){ try{stream.addTrack(t)}catch(e){} });
-  var opts={videoBitsPerSecond:VIDEO_BPS};
-  if(mime) opts.mimeType=mime;
+  var opts={videoBitsPerSecond:videoBps(isFinite(vid.duration)?vid.duration:0),mimeType:mime};
   if(aTracks.length) opts.audioBitsPerSecond=128000;
   try{ rec=new MediaRecorder(stream,opts); }
-  catch(e1){
-    try{ rec=new MediaRecorder(stream); }
-    catch(e2){ endExport(); toast("Не удалось начать запись: "+((e2&&e2.message)||e2),7000); return; }
-  }
+  catch(e1){ endExport(); toast("Не удалось начать запись MP4: "+((e1&&e1.message)||e1),7500); return; }
   exp.rec=rec;
   rec.ondataavailable=function(e){ if(e.data&&e.data.size) chunks.push(e.data); };
   rec.onerror=function(e){ cancelExport("Ошибка записи: "+((e&&e.error&&e.error.message)||"неизвестная")); };
   rec.onstop=function(){
-    var type=rec.mimeType||mime||"video/webm";
+    var type=rec.mimeType||mime;
     var cancelled=!exp||exp.cancelled;
-    var durMs=(vid&&isFinite(vid.duration))?vid.duration*1000:0;
+    var durSec=(vid&&isFinite(vid.duration))?vid.duration:0;
     stream.getVideoTracks().forEach(function(t){ t.stop() });
     endExport();
     if(cancelled) return;
     if(!chunks.length){ toast("Запись получилась пустой. Попробуйте ещё раз",7000); return; }
-    var whole=new Blob(chunks,{type:type});
-    var ready=(/webm/i.test(type)&&durMs)?fixWebmDuration(whole,durMs):Promise.resolve(whole);
-    ready.then(function(bl){ deliverBlob(bl,fnameExt(extFor(type)),type); });
+    if(!/mp4/i.test(type)){
+      toast("Браузер записал не MP4, а "+type+". Сохранение отменено: откройте страницу в Chrome или Safari",8500); return;
+    }
+    showDone(new Blob(chunks,{type:"video/mp4"}),fnameExt(".mp4"),durSec);
   };
   exp.onEnded=function(){                      // ролик доиграл: дорисовываем последний кадр и останавливаем запись
     renderVideoFrame(); setBar(1);
@@ -1046,23 +1021,48 @@ function exportVideo(){
     if(navigator.wakeLock) navigator.wakeLock.request("screen")
       .then(function(w){ if(exp) exp.wake=w; else w.release() }).catch(function(){});
   }catch(e){}
-  vid.addEventListener("playing",function begin(){
-    vid.removeEventListener("playing",begin);
-    if(!exp||exp.cancelled) return;
-    startLoop();
-    requestAnimationFrame(function(){
-      try{ rec.start(1000) }catch(e){ cancelExport("Не удалось начать запись") }
-    });
-  });
+  /* Порядок важен. Если запустить запись ровно в момент, когда пошёл звук ролика, Chrome может собрать
+     MP4 без звука и с битыми кадрами. Поэтому запись стартует ДО воспроизведения (звуковая дорожка
+     уже есть, пока в ней тишина), а на холсте в этот миг лежит первый кадр ролика. */
+  leadStill=vid._still||null;
+  vid.addEventListener("playing",function begin(){ vid.removeEventListener("playing",begin); leadStill=null; });
+  renderVideoFrame(); startLoop();
+  try{ rec.start(1000) }catch(e){ cancelExport("Не удалось начать запись"); return; }
   try{ vid.currentTime=0 }catch(e){}
   var pr=vid.play();
   if(pr&&pr.catch) pr.catch(function(err){ cancelExport("Браузер не дал запустить ролик: "+((err&&err.message)||err)); });
 }
+/* Готовый ролик не уходит в сохранение сам: на iPhone меню «Поделиться» открывается только
+   сразу после нажатия пальцем, а после нескольких минут записи Safari его бы заблокировал. */
+var doneBlob=null, doneName="";
+function showDone(blob,name,durSec){
+  doneBlob=blob; doneName=name;
+  document.getElementById("busyTitle").textContent="Видео готово";
+  document.getElementById("busyBar").hidden=true;
+  document.getElementById("cancelBtn").hidden=true;
+  document.getElementById("doneActs").hidden=false;
+  var mb=Math.max(1,Math.round(blob.size/1048576));
+  document.getElementById("busyTxt").textContent=fmtTime(durSec)+" · "+mb+" МБ. "+
+    (IS_IOS?"Нажмите «Сохранить видео», затем в меню выберите «Сохранить видео»":"Нажмите «Сохранить видео»");
+  busyEl.hidden=false;
+}
+function hideDone(){
+  doneBlob=null; busyEl.hidden=true;
+  document.getElementById("busyBar").hidden=false;
+  document.getElementById("cancelBtn").hidden=false;
+  document.getElementById("doneActs").hidden=true;
+}
+document.getElementById("doneSave").onclick=function(){
+  if(!doneBlob) return;
+  deliverBlob(doneBlob,doneName,"video/mp4");
+};
+document.getElementById("doneClose").onclick=hideDone;
 document.getElementById("cancelBtn").onclick=function(){ cancelExport(); };
 
 file.onchange=function(){
   var f=file.files&&file.files[0]; if(!f)return;
   if(exporting){ file.value=""; return; }
+  hideDone();
   if(isVideoFile(f)){
     toast("Открываем видео…",2500);
     loadVideo(f).then(function(v){
