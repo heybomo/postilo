@@ -329,15 +329,13 @@ var LAYOUTS=[
   {id:"single",name:"Одно фото",n:1},
   {id:"cols2", name:"Две колонки",n:2},
   {id:"cols3", name:"Три колонки",n:3},
-  {id:"top2",  name:"Две сверху, одна снизу",n:3},
-  {id:"diag",  name:"Диагональ",n:2}
+  {id:"top2",  name:"Две сверху, одна снизу",n:3}
 ];
 var LAYOUT_ICONS={
   single:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/>',
   cols2:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
   cols3:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.2 4.5v15M14.8 4.5v15"/>',
-  top2:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17M12 4.5V12"/>',
-  diag:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 19.5l17-15"/>'
+  top2:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17M12 4.5V12"/>'
 };
 var layoutId="single", cells=[], activeCell=0, lastGeom=null;
 function isCollage(){ return layoutId!=="single"; }
@@ -605,6 +603,9 @@ function drawOverlay(c,g){
     c.fillStyle=g2; c.fillRect(0,PH-gb,W,gb);
   }
 
+  /* 4б. перегородки коллажа */
+  drawSeps(c,g);
+
   /* 5. верхний ряд — ПОВЕРХ затемнения: рубрика слева, логотип справа, одной высоты */
   if(rubric!==NONE) drawRubric(c,inset,inset,T);
   var lw=LOGO_VB[0]*T/LOGO_VB[1];
@@ -634,18 +635,48 @@ function drawOverlay(c,g){
   kant(c,W,H,k);
 }
 
-/* Ячейки макета в координатах области фото (W × PH). У диагонали обе ячейки — треугольники
-   с общей описывающей рамкой: фото вписывается во весь кадр, а видна половина. */
-function layoutGeom(id,W,PH){
+/* Цвет рамки в точке кадра — тот же расчёт, что в kant(): коническая заливка от фиолетового (3 часа)
+   к синему по часовой стрелке. Перегородки берут цвета из рамки в тех местах, где к ней подходят. */
+var HAS_CONIC=typeof ctx.createConicGradient==="function";
+var KANT_A=[0x5A,0x00,0x7E], KANT_B=[0x00,0x77,0xFF];
+function frameRGB(x,y,W,H){
+  var t, i;
+  if(HAS_CONIC){
+    var a=Math.atan2(y-H/2,x-W/2); if(a<0) a+=2*Math.PI;
+    t=a/(2*Math.PI);
+    return [0,1,2].map(function(k){ return KANT_A[k]+(KANT_B[k]-KANT_A[k])*t; });
+  }
+  /* запасной вариант для старых браузеров без конической заливки: диагональный градиент рамки */
+  t=Math.max(0,Math.min(1,(x*W-(y-H)*H)/(W*W+H*H)));
+  var S=[[0,KANT_A],[.35,KANT_B],[.85,KANT_B],[1,[0x24,0xF1,0xFF]]];
+  for(i=1;i<S.length;i++){
+    if(t<=S[i][0]){
+      var u=(t-S[i-1][0])/(S[i][0]-S[i-1][0]);
+      return [0,1,2].map(function(k){ return S[i-1][1][k]+(S[i][1][k]-S[i-1][1][k])*u; });
+    }
+  }
+  return S[S.length-1][1];
+}
+function avgColor(pts,W,H){                 // цвет, усреднённый по нескольким точкам рамки
+  var acc=[0,0,0];
+  pts.forEach(function(p){ var c=frameRGB(p[0],p[1],W,H); acc[0]+=c[0]; acc[1]+=c[1]; acc[2]+=c[2]; });
+  return "rgb("+acc.map(function(v){ return Math.round(v/pts.length); }).join(",")+")";
+}
+
+/* Ячейки макета в координатах области фото (W × PH); H — высота всего кадра вместе с плашкой.
+   У перегородки: l — отрезок, ax — ось градиента, c0/c1 — точки рамки, откуда берутся цвета концов.
+   Вертикальные тянутся до нижней кромки кадра, даже если снизу плашка: цвет не «ломается». */
+function layoutGeom(id,W,PH,H){
   var R=function(x,y,w,h){ return {x:x,y:y,w:w,h:h,poly:[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]} };
-  if(id==="cols2") return {cells:[R(0,0,W/2,PH),R(W/2,0,W/2,PH)], seps:[[W/2,0,W/2,PH]]};
-  if(id==="cols3") return {cells:[R(0,0,W/3,PH),R(W/3,0,W/3,PH),R(2*W/3,0,W/3,PH)],
-                           seps:[[W/3,0,W/3,PH],[2*W/3,0,2*W/3,PH]]};
+  var V=function(x){ return {l:[x,0,x,PH],ax:[x,0,x,H],c0:[[x,0]],c1:[[x,H]]}; };
+  if(id==="cols2") return {cells:[R(0,0,W/2,PH),R(W/2,0,W/2,PH)], seps:[V(W/2)]};
+  if(id==="cols3") return {cells:[R(0,0,W/3,PH),R(W/3,0,W/3,PH),R(2*W/3,0,W/3,PH)], seps:[V(W/3),V(2*W/3)]};
   if(id==="top2")  return {cells:[R(0,0,W/2,PH/2),R(W/2,0,W/2,PH/2),R(0,PH/2,W,PH/2)],
-                           seps:[[W/2,0,W/2,PH/2],[0,PH/2,W,PH/2]]};
-  if(id==="diag")  return {cells:[{x:0,y:0,w:W,h:PH,poly:[[0,0],[W,0],[0,PH]]},
-                                  {x:0,y:0,w:W,h:PH,poly:[[W,0],[W,PH],[0,PH]]}],
-                           seps:[[0,PH,W,0]]};
+                           seps:[
+                             {l:[0,PH/2,W,PH/2],ax:[0,PH/2,W,PH/2],c0:[[0,PH/2]],c1:[[W,PH/2]]},
+                             /* короткая вертикальная: сверху цвет рамки, внизу — цвет горизонтальной линии в точке стыка */
+                             {l:[W/2,0,W/2,PH/2],ax:[W/2,0,W/2,PH/2],c0:[[W/2,0]],c1:[[0,PH/2],[W,PH/2]]}
+                           ]};
   return {cells:[R(0,0,W,PH)],seps:[]};
 }
 function drawInCell(c,cell,st){
@@ -657,8 +688,8 @@ function drawInCell(c,cell,st){
   c.drawImage(st.img,cell.x+(cell.w-pw)/2+st.view.x,cell.y+(cell.h-ph)/2+st.view.y,pw,ph);
 }
 function drawCollage(c,g){
-  var W=g.W, PH=g.PH, gap=Math.max(2,Math.round(W*COLLAGE_GAP));
-  var L=layoutGeom(layoutId,W,PH);
+  var W=g.W, PH=g.PH;
+  var L=layoutGeom(layoutId,W,PH,g.H);
   lastGeom={W:W,H:g.H,PH:PH,cells:L.cells};
   var bg=cssVar("--surface")||"#191919";
   L.cells.forEach(function(cell,i){
@@ -670,8 +701,22 @@ function drawCollage(c,g){
     if(st.img) drawInCell(c,cell,st);
     c.restore();
   });
-  c.strokeStyle="#FFFFFF"; c.lineWidth=gap; c.lineCap="butt";
-  L.seps.forEach(function(sp){ c.beginPath(); c.moveTo(sp[0],sp[1]); c.lineTo(sp[2],sp[3]); c.stroke(); });
+}
+
+/* Перегородки рисуются отдельно и ПОВЕРХ затемнений. Иначе верхнее и нижнее затемнение приглушало бы их,
+   а рамка (она рисуется последней) осталась бы яркой, и цвет на стыке перестал бы совпадать. */
+function drawSeps(c,g){
+  if(!isCollage()) return;
+  var W=g.W, gap=Math.max(2,Math.round(W*COLLAGE_GAP));
+  var L=layoutGeom(layoutId,W,g.PH,g.H);
+  c.save(); c.lineWidth=gap; c.lineCap="butt";
+  L.seps.forEach(function(sp){
+    var gr=c.createLinearGradient(sp.ax[0],sp.ax[1],sp.ax[2],sp.ax[3]);
+    gr.addColorStop(0,avgColor(sp.c0,W,g.H)); gr.addColorStop(1,avgColor(sp.c1,W,g.H));
+    c.strokeStyle=gr;
+    c.beginPath(); c.moveTo(sp.l[0],sp.l[1]); c.lineTo(sp.l[2],sp.l[3]); c.stroke();
+  });
+  c.restore();
 }
 
 /* Подсказки поверх кадра: рамка активной ячейки и «+» в пустых. Это отдельный слой страницы,
