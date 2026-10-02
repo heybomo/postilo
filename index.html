@@ -281,7 +281,9 @@ var FONT_RG="d09GMgABAAAAAOGwAA4AAAAC5bAAAOFTAAEAQQAAAAAAAAAAAAAAAAAAAAAAAAAAGnw
    (4:5, 1:1, 9:16) элементы одинаковые. Правится одним числом.
    ============================================================ */
 var EDGE_GAP = 46;    // от внутренней кромки рамки до элементов
-var TOP_W    = 0.05;  // высота верхнего ряда: логотип и метка рубрики ОДНОЙ высоты
+var TOP_W    = 0.035; // высота верхнего ряда: логотип и метка рубрики ОДНОЙ высоты (было 0.05 — минус 30%)
+var RUBRIC_WEIGHT = 400; // начертание текста рубрики: 400 — Regular, 800 — ExtraBold
+var KANT_W   = 0.019; // толщина рамки — доля ширины кадра (было 0.0095 — вдвое толще)
 var SRC_W    = 0.026; // кегль строки источника (не мельче 28 px при 1080)
 var WM_ALPHA = 0.10;  // прозрачность водяного знака
 var MAX_VIDEO_SEC = 300;   // 5 минут. Длиннее не берём: запись идёт в реальном времени и хранится в памяти
@@ -511,7 +513,7 @@ function spacing(c,px){try{c.letterSpacing=px.toFixed(2)+"px"}catch(e){}}
 
 function drawRubric(c,x,y,T){
   var fs=Math.round(T*0.52);
-  c.font="800 "+fs+"px "+FAMILY; spacing(c,fs*0.02);
+  c.font=RUBRIC_WEIGHT+" "+fs+"px "+FAMILY; spacing(c,fs*0.02);
   var txt=rubric.toUpperCase();
   var tw=c.measureText(txt).width;
   var capH=c.measureText("H").actualBoundingBoxAscent||fs*0.7;
@@ -542,7 +544,7 @@ function drawWatermark(c,W,PH,inset){
 /* ---------- геометрия и слои поверх фото/видео ---------- */
 function geometry(){
   var W=cur.w,H=cur.h;
-  var k=Math.round(W*0.0095);
+  var k=Math.round(W*KANT_W);
   var inset=k+EDGE_GAP;
   var T=Math.round(W*TOP_W);
   var P=plateOn?layoutPlate(W,H,k,inset):null;   // плашка считается первой — от неё зависит высота фото
