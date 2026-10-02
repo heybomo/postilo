@@ -174,6 +174,14 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
 .btn-ghost{border:1px solid var(--line);flex:0 0 38%}
 .btn[disabled]{opacity:.35;pointer-events:none}
 
+/* ---------- макеты (коллаж) ---------- */
+.layouts{display:flex;gap:6px}
+.layouts button{flex:1;height:48px;border:1px solid var(--line);border-radius:10px;background:var(--field);
+                color:var(--mute);display:flex;align-items:center;justify-content:center}
+.layouts button svg{width:26px;height:26px;display:block}
+.layouts button[aria-pressed="true"]{border-color:var(--blue);color:var(--blue);box-shadow:inset 0 0 0 1px var(--blue)}
+.cellov{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+
 .toast{position:fixed;left:50%;bottom:calc(82px + env(safe-area-inset-bottom,0px));
   transform:translateX(-50%);background:var(--toast-bg);color:var(--toast-ink);
   padding:11px 18px;border-radius:16px;font-size:14px;font-weight:600;z-index:30;
@@ -204,6 +212,7 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
   <main>
     <div class="stage" id="stage">
       <canvas id="cv"></canvas>
+      <svg class="cellov" id="cellOv" preserveAspectRatio="none" aria-hidden="true"></svg>
       <div class="empty" id="empty">
         <strong>Начните с фото или видео</strong>
         Снимите или выберите из галереи
@@ -231,12 +240,13 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
   </div>
 
   <div class="zoom" id="zoomBar" hidden>
-    <label for="zoom">Масштаб</label>
+    <label for="zoom" id="zoomLabel">Масштаб</label>
     <input type="range" id="zoom" min="100" max="320" value="100">
   </div>
 </div>
 
 <div class="controls">
+  <div class="layouts" id="layouts" role="group" aria-label="Макет слайда"></div>
   <select id="rub" aria-label="Рубрика"></select>
   <input type="text" id="src" placeholder="Источник:" aria-label="Источник">
 
@@ -311,6 +321,27 @@ var K="soyuzny.kadr.";
 var cur=FORMATS[0], rubric=RUBRICS[0], source="";
 var photo=null, logo=null, areaH=1350;
 var isVideo=false, vid=null, overlayCache=null, exporting=false, loopOn=false, loopTok=0, leadStill=null;
+
+/* ---------- макеты: несколько фото в одном слайде ---------- */
+var COLLAGE_GAP = 0.0075;   // толщина белой перегородки между фото — доля ширины кадра
+var COLLAGE_MAX_PX = 2400;  // крупнее по длинной стороне фото ужимается: так легче телефону
+var LAYOUTS=[
+  {id:"single",name:"Одно фото",n:1},
+  {id:"cols2", name:"Две колонки",n:2},
+  {id:"cols3", name:"Три колонки",n:3},
+  {id:"top2",  name:"Две сверху, одна снизу",n:3},
+  {id:"diag",  name:"Диагональ",n:2}
+];
+var LAYOUT_ICONS={
+  single:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/>',
+  cols2:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
+  cols3:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.2 4.5v15M14.8 4.5v15"/>',
+  top2:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17M12 4.5V12"/>',
+  diag:'<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 19.5l17-15"/>'
+};
+var layoutId="single", cells=[], activeCell=0, lastGeom=null;
+function isCollage(){ return layoutId!=="single"; }
+function collageReady(){ return cells.length>0&&cells.every(function(c){return !!c.img}); }
 var wmOn=false, plateOn=false, align="left", sizeIdx=1;
 var view={scale:1,x:0,y:0}, busy=false;
 
@@ -603,12 +634,86 @@ function drawOverlay(c,g){
   kant(c,W,H,k);
 }
 
+/* Ячейки макета в координатах области фото (W × PH). У диагонали обе ячейки — треугольники
+   с общей описывающей рамкой: фото вписывается во весь кадр, а видна половина. */
+function layoutGeom(id,W,PH){
+  var R=function(x,y,w,h){ return {x:x,y:y,w:w,h:h,poly:[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]} };
+  if(id==="cols2") return {cells:[R(0,0,W/2,PH),R(W/2,0,W/2,PH)], seps:[[W/2,0,W/2,PH]]};
+  if(id==="cols3") return {cells:[R(0,0,W/3,PH),R(W/3,0,W/3,PH),R(2*W/3,0,W/3,PH)],
+                           seps:[[W/3,0,W/3,PH],[2*W/3,0,2*W/3,PH]]};
+  if(id==="top2")  return {cells:[R(0,0,W/2,PH/2),R(W/2,0,W/2,PH/2),R(0,PH/2,W,PH/2)],
+                           seps:[[W/2,0,W/2,PH/2],[0,PH/2,W,PH/2]]};
+  if(id==="diag")  return {cells:[{x:0,y:0,w:W,h:PH,poly:[[0,0],[W,0],[0,PH]]},
+                                  {x:0,y:0,w:W,h:PH,poly:[[W,0],[W,PH],[0,PH]]}],
+                           seps:[[0,PH,W,0]]};
+  return {cells:[R(0,0,W,PH)],seps:[]};
+}
+function drawInCell(c,cell,st){
+  var iw=sw(st.img), ih=sh(st.img);
+  var s=Math.max(cell.w/iw,cell.h/ih)*st.view.scale, pw=iw*s, ph=ih*s;
+  var mx=Math.max(0,(pw-cell.w)/2), my=Math.max(0,(ph-cell.h)/2);
+  st.view.x=Math.min(mx,Math.max(-mx,st.view.x));
+  st.view.y=Math.min(my,Math.max(-my,st.view.y));
+  c.drawImage(st.img,cell.x+(cell.w-pw)/2+st.view.x,cell.y+(cell.h-ph)/2+st.view.y,pw,ph);
+}
+function drawCollage(c,g){
+  var W=g.W, PH=g.PH, gap=Math.max(2,Math.round(W*COLLAGE_GAP));
+  var L=layoutGeom(layoutId,W,PH);
+  lastGeom={W:W,H:g.H,PH:PH,cells:L.cells};
+  var bg=cssVar("--surface")||"#191919";
+  L.cells.forEach(function(cell,i){
+    var st=cells[i]||{};
+    c.save(); c.beginPath();
+    cell.poly.forEach(function(p,j){ if(j) c.lineTo(p[0],p[1]); else c.moveTo(p[0],p[1]); });
+    c.closePath(); c.clip();
+    c.fillStyle=bg; c.fillRect(cell.x,cell.y,cell.w,cell.h);
+    if(st.img) drawInCell(c,cell,st);
+    c.restore();
+  });
+  c.strokeStyle="#FFFFFF"; c.lineWidth=gap; c.lineCap="butt";
+  L.seps.forEach(function(sp){ c.beginPath(); c.moveTo(sp[0],sp[1]); c.lineTo(sp[2],sp[3]); c.stroke(); });
+}
+
+/* Подсказки поверх кадра: рамка активной ячейки и «+» в пустых. Это отдельный слой страницы,
+   в готовую картинку он не попадает. */
+var cellOv=document.getElementById("cellOv");
+function drawCellOv(){
+  if(!lastGeom){ cellOv.innerHTML=""; return; }
+  var W=lastGeom.W;
+  cellOv.setAttribute("viewBox","0 0 "+W+" "+lastGeom.H);
+  var out="";
+  lastGeom.cells.forEach(function(cell,i){
+    var pts=cell.poly.map(function(p){return p[0]+","+p[1]}).join(" ");
+    var st=cells[i], isEmpty=!(st&&st.img);
+    if(i===activeCell)
+      out+='<polygon points="'+pts+'" fill="none" stroke="#24F1FF" stroke-width="'+(W*0.008)+'" stroke-linejoin="round"/>';
+    if(isEmpty){
+      var cx=0, cy=0; cell.poly.forEach(function(p){cx+=p[0];cy+=p[1]}); cx/=cell.poly.length; cy/=cell.poly.length;
+      var r=W*0.045, a=r*0.42;
+      out+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="rgba(0,0,0,.55)"/>'+
+           '<path d="M'+(cx-a)+' '+cy+'H'+(cx+a)+'M'+cx+' '+(cy-a)+'V'+(cy+a)+'" stroke="#fff" stroke-width="'+(W*0.007)+'" stroke-linecap="round"/>';
+    }
+  });
+  cellOv.innerHTML=out;
+}
+function clearCellOv(){ if(cellOv.firstChild) cellOv.innerHTML=""; }
+
+function updatePickLabel(){
+  var b=document.getElementById("pickBtn");
+  b.textContent=isCollage()?"Фото в ячейку "+(activeCell+1):(photo?"Заменить":"Фото / видео");
+}
+
 function syncUi(PH){
-  empty.hidden=!!photo;
+  var col=isCollage();
+  empty.hidden=col||!!photo;
   empty.style.height=(PH/cur.h*100)+"%";
-  document.getElementById("saveBtn").disabled=!photo;
-  document.getElementById("zoomBar").hidden=!photo;
+  var act=col&&cells[activeCell]&&cells[activeCell].img;
+  document.getElementById("saveBtn").disabled=col?!collageReady():!photo;
+  document.getElementById("zoomBar").hidden=col?!act:!photo;
+  document.getElementById("zoomLabel").textContent=col?"Масштаб · "+(activeCell+1):"Масштаб";
   document.getElementById("vBar").hidden=!isVideo;
+  if(col) drawCellOv(); else clearCellOv();
+  updatePickLabel();
 }
 
 function render(){
@@ -622,9 +727,11 @@ function render(){
   var PH=g.PH;
   areaH=PH;
 
-  /* 1. фото */
+  /* 1. фото (или несколько фото в макете) */
   ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,PH); ctx.clip();
-  if(photo){
+  if(isCollage()){
+    drawCollage(ctx,g);
+  }else if(photo){
     clamp();
     var s=coverBase()*view.scale;
     var pw=sw(photo)*s, ph=sh(photo)*s;
@@ -695,6 +802,7 @@ FORMATS.forEach(function(f){
   b.setAttribute("aria-pressed",f===cur);
   b.onclick=function(){
     cur=f; view={scale:1,x:0,y:0};
+    cells.forEach(function(c){ c.view={scale:1,x:0,y:0}; });
     document.getElementById("zoom").value=100;
     [].forEach.call(nav.children,function(el,i){el.setAttribute("aria-pressed",FORMATS[i]===cur)});
     save("fmt",f.id); fitStage(); render();
@@ -1061,10 +1169,52 @@ document.getElementById("doneSave").onclick=function(){
 document.getElementById("doneClose").onclick=hideDone;
 document.getElementById("cancelBtn").onclick=function(){ cancelExport(); };
 
+function shrinkImage(img,max){
+  var w=sw(img), h=sh(img), m=Math.max(w,h); if(m<=max) return img;
+  var k=max/m, c=document.createElement("canvas");
+  c.width=Math.round(w*k); c.height=Math.round(h*k);
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height); return c;
+}
+function firstEmptyCell(from){
+  for(var i=from||0;i<cells.length;i++) if(!cells[i].img) return i;
+  for(var j=0;j<cells.length;j++) if(!cells[j].img) return j;
+  return -1;
+}
+/* Файлы идут в ячейки подряд, начиная с выбранной. Выбрали одно фото — оно заменит выбранную ячейку. */
+function addToCollage(list){
+  var photos=list.filter(function(f){ return !isVideoFile(f); });
+  if(photos.length<list.length) toast("В коллаже пока только фото — видео пропущено",5500);
+  if(!photos.length) return;
+  var start=activeCell, room=cells.length-start;
+  var use=photos.slice(0,room);
+  var jobs=use.map(function(f){
+    return loadImage(f).then(function(i){ return {i:shrinkImage(i,COLLAGE_MAX_PX),f:f}; },
+                             function(){ return {err:true,f:f}; });
+  });
+  Promise.all(jobs).then(function(res){
+    var bad=[];
+    res.forEach(function(r,k){
+      if(r.err) bad.push(r.f);
+      else cells[start+k]={img:r.i,view:{scale:1,x:0,y:0}};
+    });
+    var extra=photos.length-use.length;
+    if(bad.length){ console.warn("Не открылся файл:",bad[0].name,bad[0].type,bad[0].size); toast(explain(bad[0]),6500); }
+    else if(extra>0) toast("Фото больше, чем ячеек: "+extra+" не поместилось",5000);
+    var next=firstEmptyCell(start+use.length);
+    activeCell=next>=0?next:Math.min(start+use.length-1,cells.length-1);
+    var st=cells[activeCell];
+    document.getElementById("zoom").value=Math.round(((st&&st.view.scale)||1)*100);
+    try{ render(); }
+    catch(e){ console.error(e); toast("Фото открылись, но кадр не нарисовался: "+((e&&e.message)||e),6000); }
+  });
+}
+
 file.onchange=function(){
-  var f=file.files&&file.files[0]; if(!f)return;
+  var list=[].slice.call(file.files||[]); if(!list.length)return;
   if(exporting){ file.value=""; return; }
   hideDone();
+  if(isCollage()){ addToCollage(list); file.value=""; return; }
+  var f=list[0];
   if(isVideoFile(f)){
     toast("Открываем видео…",2500);
     loadVideo(f).then(function(v){
@@ -1092,29 +1242,116 @@ file.onchange=function(){
   file.value="";
 };
 
-var drag=null,pinch=null;
+var drag=null, pinch=null, tapInfo=null;
+var zoomEl=document.getElementById("zoom");
+function activeView(){                      // чьим сдвигом и масштабом управляют пальцы
+  if(isCollage()){ var st=cells[activeCell]; return st&&st.img?st.view:null; }
+  return photo?view:null;
+}
+function hitCell(e){                        // номер ячейки под пальцем или -1
+  if(!lastGeom) return -1;
+  var r=stage.getBoundingClientRect();
+  var x=(e.clientX-r.left)*cur.w/r.width, y=(e.clientY-r.top)*cur.h/r.height;
+  for(var i=0;i<lastGeom.cells.length;i++){
+    var poly=lastGeom.cells[i].poly, ins=false;
+    for(var a=0,b=poly.length-1;a<poly.length;b=a++){
+      var xi=poly[a][0], yi=poly[a][1], xj=poly[b][0], yj=poly[b][1];
+      if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi)) ins=!ins;
+    }
+    if(ins) return i;
+  }
+  return -1;
+}
+function selectCell(i){
+  activeCell=i;
+  var st=cells[i];
+  zoomEl.value=Math.round(((st&&st.view.scale)||1)*100);
+  render();
+}
 stage.addEventListener("pointerdown",function(e){
-  if(!photo||exporting)return; stage.setPointerCapture(e.pointerId);
-  drag={id:e.pointerId,x:e.clientX,y:e.clientY};
+  if(exporting)return;
+  if(isCollage()){
+    var i=hitCell(e); if(i<0) return;
+    if(i!==activeCell) selectCell(i);
+    stage.setPointerCapture(e.pointerId);
+    drag={id:e.pointerId,x:e.clientX,y:e.clientY,moved:0,cell:i};
+    return;
+  }
+  if(!photo)return;
+  stage.setPointerCapture(e.pointerId);
+  drag={id:e.pointerId,x:e.clientX,y:e.clientY,moved:0};
 });
 stage.addEventListener("pointermove",function(e){
-  if(!photo||!drag||drag.id!==e.pointerId||pinch)return;
+  if(!drag||drag.id!==e.pointerId||pinch)return;
+  drag.moved+=Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y);
+  var v=activeView();
+  if(!v){ drag.x=e.clientX; drag.y=e.clientY; return; }      // пустая ячейка: двигать нечего
   var k=cur.w/stage.clientWidth;
-  view.x+=(e.clientX-drag.x)*k; view.y+=(e.clientY-drag.y)*k;
+  v.x+=(e.clientX-drag.x)*k; v.y+=(e.clientY-drag.y)*k;
   drag.x=e.clientX; drag.y=e.clientY; render();
 });
-["pointerup","pointercancel"].forEach(function(t){stage.addEventListener(t,function(){drag=null})});
+["pointerup","pointercancel"].forEach(function(t){
+  stage.addEventListener(t,function(){ tapInfo=drag?{moved:drag.moved,cell:drag.cell}:null; drag=null; });
+});
+stage.addEventListener("click",function(){                 // короткое касание пустой ячейки открывает выбор фото
+  if(!isCollage()||exporting) return;
+  var t=tapInfo; tapInfo=null;
+  if(!t||t.moved>8) return;
+  var st=cells[t.cell]; if(st&&!st.img) file.click();
+});
 function dist(t){return Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY)}
-stage.addEventListener("touchstart",function(e){if(e.touches.length===2)pinch={d:dist(e.touches),s:view.scale}},{passive:true});
+stage.addEventListener("touchstart",function(e){
+  if(e.touches.length===2){ var v=activeView(); if(v) pinch={d:dist(e.touches),s:v.scale,v:v}; }
+},{passive:true});
 stage.addEventListener("touchmove",function(e){
   if(pinch&&e.touches.length===2){
     e.preventDefault();
-    view.scale=Math.min(3.2,Math.max(1,pinch.s*dist(e.touches)/pinch.d));
-    document.getElementById("zoom").value=Math.round(view.scale*100); render();
+    pinch.v.scale=Math.min(3.2,Math.max(1,pinch.s*dist(e.touches)/pinch.d));
+    zoomEl.value=Math.round(pinch.v.scale*100); render();
   }
 },{passive:false});
 stage.addEventListener("touchend",function(e){if(e.touches.length<2)pinch=null},{passive:true});
-document.getElementById("zoom").oninput=function(){view.scale=this.value/100;render()};
+zoomEl.oninput=function(){ var v=activeView(); if(!v) return; v.scale=this.value/100; render(); };
+
+/* ---------- выбор макета ---------- */
+var layoutsEl=document.getElementById("layouts");
+LAYOUTS.forEach(function(l){
+  var b=document.createElement("button");
+  b.type="button"; b.dataset.id=l.id; b.title=l.name; b.setAttribute("aria-label",l.name);
+  b.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+LAYOUT_ICONS[l.id]+'</svg>';
+  b.onclick=function(){ setLayout(l.id); };
+  layoutsEl.appendChild(b);
+});
+function syncLayoutUi(){
+  [].forEach.call(layoutsEl.children,function(b){ b.setAttribute("aria-pressed",b.dataset.id===layoutId); });
+  file.multiple=isCollage();
+  file.accept=isCollage()?"image/*":"image/*,video/*";
+}
+function clearMedia(){
+  stopLoop(); if(vid){ try{vid.pause()}catch(e){} dropVideoEl(); }
+  vid=null; isVideo=false; photo=null; overlayCache=null; leadStill=null;
+}
+/* Уже загруженные фото переезжают в новый макет по порядку; лишние остаются за его пределами. */
+function setLayout(id){
+  if(id===layoutId||exporting) return;
+  hideDone();
+  var def=LAYOUTS.filter(function(l){return l.id===id})[0], imgs=[];
+  if(layoutId==="single"){
+    if(isVideo){ clearMedia(); toast("Видео убрано: коллаж собирается только из фото",5500); }
+    else if(photo) imgs.push(photo);
+  }else{
+    imgs=cells.filter(function(c){return c.img}).map(function(c){return c.img});
+  }
+  layoutId=id;
+  if(id==="single"){
+    cells=[]; photo=imgs[0]||null; view={scale:1,x:0,y:0}; activeCell=0;
+  }else{
+    cells=[]; for(var i=0;i<def.n;i++) cells.push({img:imgs[i]||null,view:{scale:1,x:0,y:0}});
+    photo=null; var fe=firstEmptyCell(0); activeCell=fe<0?0:fe;
+  }
+  zoomEl.value=100;
+  syncLayoutUi(); render();
+}
 
 /* ---------- сохранение ---------- */
 
@@ -1149,7 +1386,8 @@ function deliverBlob(blob,name,type,done){
   localSave(blob,name); done();
 }
 document.getElementById("saveBtn").onclick=function(){
-  if(!photo||busy||exporting)return;
+  if(busy||exporting)return;
+  if(isCollage()){ if(!collageReady()) return; } else if(!photo) return;
   if(isVideo){ exportVideo(); return; }
   busy=true; var btn=this, was=btn.textContent; btn.textContent="Готовим…";
   function done(){busy=false;btn.textContent=was}
@@ -1171,7 +1409,7 @@ if(ss){srcInput.value=ss;source=ss.trim()}
 if(read("wm")==="1"){wmOn=true;wmBox.checked=true}
 var sa=read("align"); if(sa&&ICONS[sa]) align=sa;
 var sz0=read("size"); if(sz0!==null&&PLATE_SIZES[+sz0]) sizeIdx=+sz0;
-syncTb(); syncEmpty();
+syncTb(); syncEmpty(); syncLayoutUi();
 
 window.addEventListener("resize",function(){fitStage();render()});
 window.addEventListener("orientationchange",function(){setTimeout(function(){fitStage();render()},200)});
