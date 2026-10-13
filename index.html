@@ -1535,6 +1535,8 @@ var tl=document.getElementById("tl"), tlStrip=document.getElementById("tlStrip")
 var scrubbing=false, AC=null, exp=null, markerOn=false;
 var trim={a:0,b:0};                       // фрагмент ролика, который уйдёт в запись (секунды)
 var TRIM_MIN=0.5;
+var SYNC_CHECK=false;      // пробная запись перед сохранением (выключена — зависала в Safari)
+var DEFAULT_DELAY=0.1;     // на сколько задерживаем звук в записи в реальном времени, с
 var FADE_SEC=0.3;          // плавное появление и затухание звука на краях фрагмента
 var keepAudioBox=document.getElementById("keepAudio");
 keepAudioBox.checked=read("keepAudio")!=="0";
@@ -1841,7 +1843,9 @@ function trackSlip(){
   var now=performance.now();
   if(exp.slipAt&&now-exp.slipAt<500) return;
   exp.slipAt=now;
-  exp.slip=(now-exp.w0)/1000-(AC.currentTime-exp.ac0);
+  var sl=(now-exp.w0)/1000-(AC.currentTime-exp.ac0);
+  /* если звук в браузере приостановлен или часы ведут себя странно — не подстраиваем */
+  exp.slip=(AC.state==="running"&&Math.abs(sl)<1)?sl:0;
   try{ vid._delay.delayTime.setTargetAtTime(curDelay(),AC.currentTime,0.5); }catch(e){}
   window.__slip=exp.slip;
 }
@@ -2263,6 +2267,15 @@ async function fastExport(segs,join,myExp,onProgress){
   return outs;
 }
 
+/* Safari разрешает запускать ролик со звуком только из нажатия пальцем. Запись стартует позже, поэтому
+   в самом нажатии «Сохранить» коротко запускаем и останавливаем ролик — дальше браузер его не блокирует. */
+function unlockPlay(){
+  if(!vid||vid._unlocked) return;
+  try{
+    var pp=vid.play(); vid.pause(); vid._unlocked=true;     // сам вызов из нажатия снимает запрет
+    if(pp&&pp.catch) pp.catch(function(){});
+  }catch(e){}
+}
 function exportVideo(){
   if(exporting||!isVideo||!vid) return;
   if(!(FAST_API&&fastOn&&curVideoFile&&curVideoFile.size<=FAST_MAX_BYTES)){ exportVideoRT(); return; }
@@ -2322,7 +2335,7 @@ function exportVideoRT(){
   function alive(){ return exp===myExp&&!myExp.cancelled; }
   exporting=true; document.body.classList.add("exporting");
   busyEl.hidden=false; document.getElementById("barFill").style.width="0%";
-  setBusy("Проверяем синхронизацию звука…","Пара секунд. "+busyNote);
+  setBusy("Готовим запись…",busyNote);
   if(L>600) toast("Фрагмент "+fmtTime(L)+": сохранение займёт примерно столько же. Телефон лучше поставить на зарядку",8000);
   vid.pause(); stopLoop();
   var hasAudio=false;
@@ -2369,15 +2382,30 @@ function exportVideoRT(){
   }
 
   /* шаг 1 — проверка синхронизации */
-  function syncCheck(cb){
+  function syncCheck(cb0){
+    /* сторож: если какой-то шаг проверки в этом браузере не завершился за 20 с — пропускаем проверку,
+       ставим стандартную поправку и пишем ролик дальше, а не висим на экране «Проверяем…» */
+    var fired=false, step="перемотка", wd=null;
+    function cb(r){ if(fired) return; fired=true; clearTimeout(wd); window.__checkStep=step; cb0(r); }
+    wd=setTimeout(function(){
+      if(fired||!alive()) return;
+      console.warn("Проверка синхронизации зависла на шаге:",step);
+      var r=exp.rec; exp.rec=null; markerOn=false;
+      if(r){ r.onstop=null; r.ondataavailable=null; try{ if(r.state!=="inactive") r.stop(); }catch(e){} }
+      try{ vid.pause(); }catch(e){} stopLoop();
+      cb({ok:false,why:"проверка зависла: "+step});
+    },20000);
     if(!hasAudio||!HAS_VFC||!window.Promise){ cb({ok:false,why:!hasAudio?"нет звука":"браузер не умеет покадровый разбор"}); return; }
     seekAndWait(A,function(){
       vid._cg.gain.value=0; vid._delay.delayTime.value=0;   // звук ролика в проверку не пускаем — только писк
-      var r0=newRec(); if(!r0) return;
+      step="создание записи";
+      var r0=newRec(); if(!r0){ clearTimeout(wd); return; }
       var ch=[]; exp.rec=r0;
       r0.ondataavailable=function(e){ if(e.data&&e.data.size) ch.push(e.data); };
-      r0.onerror=function(){ };
+      r0.onerror=function(e){ console.warn("Ошибка записи проверки:",e&&e.error); };
       r0.onstop=function(){
+        if(r0._stopped) return; r0._stopped=true;
+        step="разбор записи";
         if(exp===myExp) exp.rec=null;
         vid.pause(); stopLoop(); markerOn=false;
         if(myExp.cancelled){ endExport(); return; }
@@ -2391,7 +2419,8 @@ function exportVideoRT(){
         }).catch(function(e){ settle({ok:false,why:"ошибка разбора: "+((e&&e.message)||e)}); });
       };
       leadStill=null; renderVideoFrame(); startLoop();
-      try{ r0.start() }catch(e){ cb({ok:false,why:"запись не стартовала"}); return; }
+      try{ r0.start() }catch(e){ exp.rec=null; cb({ok:false,why:"запись не стартовала"}); return; }
+      step="запуск ролика";
       waitDraws(6,1200,function(){
         var pr=vid.play(); if(pr&&pr.catch) pr.catch(function(){});   // ролик играет — нагрузка как в настоящей записи
         waitDraws(12,1500,function(){
@@ -2402,9 +2431,15 @@ function exportVideoRT(){
             osc.connect(g); g.connect(vid._delay);
             osc.start(); osc.stop(AC.currentTime+0.3);
           }catch(e){}
+          step="метка";
           markerOn=true; drawNow();
           setTimeout(function(){ markerOn=false; if(alive()) drawNow(); },400);
-          setTimeout(function(){ try{ if(r0.state!=="inactive") r0.stop() }catch(e){} },1100);
+          setTimeout(function(){
+            step="остановка записи";
+            try{ if(r0.state!=="inactive") r0.stop() }catch(e){}
+            /* в некоторых браузерах запись не сообщает, что остановилась — не ждём вечно */
+            setTimeout(function(){ if(!r0._stopped&&alive()&&r0.onstop) r0.onstop(); },4000);
+          },1100);
         });
       });
     });
@@ -2428,6 +2463,7 @@ function exportVideoRT(){
       rec.ondataavailable=function(e){ if(e.data&&e.data.size) myChunks.push(e.data); };
       rec.onerror=function(e){ cancelExport("Ошибка записи: "+((e&&e.error&&e.error.message)||"неизвестная")); };
       rec.onstop=function(){
+        if(r._stopped) return; r._stopped=true;
         if(myExp.cancelled){ stream.getVideoTracks().forEach(function(t){ t.stop() }); endExport(); return; }
         var type=r.mimeType||mime;
         if(!myChunks.length){ stream.getVideoTracks().forEach(function(t){ t.stop() }); endExport(); toast("Запись получилась пустой. Попробуйте ещё раз",7000); return; }
@@ -2497,6 +2533,8 @@ function exportVideoRT(){
         }else{
           if(si===SEGS.length-1) setBar(1);
           try{ if(rec.state!=="inactive") rec.stop() }catch(e){}
+          var rr=rec;     // если браузер не сообщил об остановке — собираем файл из того, что уже пришло
+          setTimeout(function(){ if(!rr._stopped&&rr.onstop&&exp===myExp) rr.onstop(); },6000);
         }
       },250+Math.round(curDelay()*1000));
     };
@@ -2521,7 +2559,10 @@ function exportVideoRT(){
     }
     return D;
   }
-  syncCheck(function(res){ startMain(computeD(res)); });
+  /* Проверка синхронизации выключена: на iPhone и в Safari пробная запись зависала.
+     Ставим стандартную поправку звука; точное время даёт быстрое сохранение в Chrome. */
+  if(SYNC_CHECK) syncCheck(function(res){ startMain(computeD(res)); });
+  else{ myExp.syncNote=""; startMain(hasAudio?DEFAULT_DELAY:0); }
 }
 /* Готовый ролик не уходит в сохранение сам: на iPhone меню «Поделиться» открывается только
    сразу после нажатия пальцем, а после нескольких минут записи Safari его бы заблокировал. */
