@@ -2023,6 +2023,42 @@ var fastOn=read("fast")!=="0";
 var curVideoFile=null, fastT=null;
 function fastSleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
 
+/* NAL-блоки H.264: из Annex B (00 00 01) или из формата с длинами (MP4) */
+function fastNals(u){
+  var out=[], i=0, n=u.length;
+  var annexb=n>4&&u[0]===0&&u[1]===0&&(u[2]===1||(u[2]===0&&u[3]===1));
+  if(!annexb){
+    while(i+4<=n){ var len=(u[i]<<24|u[i+1]<<16|u[i+2]<<8|u[i+3])>>>0; i+=4; if(len<=0||i+len>n) break; out.push(u.subarray(i,i+len)); i+=len; }
+    return out;
+  }
+  var starts=[];
+  for(var k=0;k+2<n;k++){ if(u[k]===0&&u[k+1]===0&&u[k+2]===1){ starts.push(k+3); k+=2; } }
+  for(var s=0;s<starts.length;s++){
+    var b=starts[s], e=s+1<starts.length?starts[s+1]-3:n;
+    while(e>b&&u[e-1]===0) e--;                        // хвостовые нули перед следующим стартовым кодом
+    if(e>b) out.push(u.subarray(b,e));
+  }
+  return out;
+}
+function fastAvcc(nals){
+  var tot=0; nals.forEach(function(x){ tot+=4+x.length; });
+  var o=new Uint8Array(tot), p2=0;
+  nals.forEach(function(x){ var l=x.length; o[p2]=l>>>24; o[p2+1]=(l>>16)&255; o[p2+2]=(l>>8)&255; o[p2+3]=l&255; o.set(x,p2+4); p2+=4+l; });
+  return o;
+}
+function fastAvcC(sps,pps){
+  var o=new Uint8Array(11+sps.length+pps.length), k=0;
+  o[k++]=1; o[k++]=sps[1]; o[k++]=sps[2]; o[k++]=sps[3]; o[k++]=0xFF; o[k++]=0xE1;
+  o[k++]=sps.length>>8; o[k++]=sps.length&255; o.set(sps,k); k+=sps.length;
+  o[k++]=1; o[k++]=pps.length>>8; o[k++]=pps.length&255; o.set(pps,k);
+  return o;
+}
+function fastAsc(sr,ch){                            // AudioSpecificConfig для AAC-LC
+  var rates=[96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350], fi=rates.indexOf(sr);
+  if(fi<0) fi=3;
+  return new Uint8Array([(2<<3)|(fi>>1),((fi&1)<<7)|(ch<<3)]);
+}
+
 /* разбор MP4/MOV: дорожки, их настройки и все сэмплы */
 function fastProbe(file){
   return new Promise(function(resolve,reject){
@@ -2109,7 +2145,7 @@ async function fastExport(segs,join,myExp,onProgress){
   var totalLen=segs.reduce(function(s,g){ return s+g.b-g.a; },0);
   var venc=null, vcodecs=["avc1.640028","avc1.4D0028","avc1.42E028"], vencCfg=null;
   for(var i=0;i<vcodecs.length&&!vencCfg;i++){
-    var c={codec:vcodecs[i],width:W,height:H,bitrate:videoBps(totalLen),framerate:30,avc:{format:"avc"}};
+    var c={codec:vcodecs[i],width:W,height:H,bitrate:videoBps(totalLen),framerate:30,avc:{format:"annexb"}};
     if((await VideoEncoder.isConfigSupported(c)).supported) vencCfg=c;
   }
   if(!vencCfg) throw new Error("браузер не сжимает H.264 этого размера");
@@ -2145,11 +2181,37 @@ async function fastExport(segs,join,myExp,onProgress){
       audio:aencCfg?{codec:aCodec,numberOfChannels:outCh,sampleRate:sr}:undefined,
       fastStart:"in-memory",firstTimestampBehavior:"cross-track-offset"
     });
-    venc=new VideoEncoder({output:function(ch,meta){ muxer.addVideoChunk(ch,meta); },error:function(e){ err=e; }});
+    var vDesc=null, vSent=false;
+    venc=new VideoEncoder({output:function(ch,meta){
+      try{
+        /* Кодек просим отдавать поток в виде Annex B: тогда описание (SPS/PPS) идёт прямо в ключевых кадрах,
+           и файл собирается одинаково в Chrome и Safari (Safari описание отдельно не присылает) */
+        var buf=new Uint8Array(ch.byteLength); ch.copyTo(buf);
+        var nals=fastNals(buf), sps=null, pps=null;
+        nals.forEach(function(n){ var t=n[0]&31; if(t===7&&!sps) sps=n; else if(t===8&&!pps) pps=n; });
+        if(!vDesc&&sps&&pps) vDesc=fastAvcC(sps,pps);
+        if(!vDesc&&meta&&meta.decoderConfig&&meta.decoderConfig.description){
+          var d0=meta.decoderConfig.description; vDesc=new Uint8Array(d0.buffer?d0.buffer.slice(d0.byteOffset||0,(d0.byteOffset||0)+d0.byteLength):d0);
+        }
+        if(!vDesc) throw new Error("кодек не отдал описание видео");
+        var m;
+        if(!vSent){ vSent=true; m={decoderConfig:{codec:"avc1."+[vDesc[1],vDesc[2],vDesc[3]].map(function(x){ return (x<16?"0":"")+x.toString(16); }).join(""),
+          codedWidth:W,codedHeight:H,description:vDesc}}; }
+        muxer.addVideoChunkRaw(fastAvcc(nals),ch.type,ch.timestamp,ch.duration||0,m);
+      }catch(e){ err=e; }
+    },error:function(e){ err=e; }});
     venc.configure(vencCfg);
     var aenc=null;
     if(aencCfg){
-      aenc=new AudioEncoder({output:function(ch,meta){ muxer.addAudioChunk(ch,meta); },error:function(e){ err=e; }});
+      var aSent=false;
+      aenc=new AudioEncoder({output:function(ch,meta){
+        try{
+          if(!aSent&&aCodec==="aac"&&!(meta&&meta.decoderConfig&&meta.decoderConfig.description)){
+            meta={decoderConfig:{codec:"mp4a.40.2",sampleRate:sr,numberOfChannels:outCh,description:fastAsc(sr,outCh)}};
+          }
+          aSent=true; muxer.addAudioChunk(ch,meta);
+        }catch(e){ err=e; }
+      },error:function(e){ err=e; }});
       aenc.configure(aencCfg);
     }
     var outOff=0, frameNo=0, titrBase=0;
@@ -2459,7 +2521,7 @@ function exportVideoRT(){
     function makeRec(){
       chunks=[]; rec=newRec(); if(!rec) return false;
       exp.rec=rec;
-      var myChunks=chunks, r=rec;
+      var myChunks=chunks, r=rec; r._chunks=myChunks;
       rec.ondataavailable=function(e){ if(e.data&&e.data.size) myChunks.push(e.data); };
       rec.onerror=function(e){ cancelExport("Ошибка записи: "+((e&&e.error&&e.error.message)||"неизвестная")); };
       rec.onstop=function(){
@@ -2533,8 +2595,16 @@ function exportVideoRT(){
         }else{
           if(si===SEGS.length-1) setBar(1);
           try{ if(rec.state!=="inactive") rec.stop() }catch(e){}
-          var rr=rec;     // если браузер не сообщил об остановке — собираем файл из того, что уже пришло
-          setTimeout(function(){ if(!rr._stopped&&rr.onstop&&exp===myExp) rr.onstop(); },6000);
+          /* Safari отдаёт весь файл только после остановки и на длинном ролике может собирать его долго.
+             Ждём; если браузер так и не сообщил об остановке — собираем файл из того, что пришло. */
+          var rr=rec, t0s=performance.now();
+          exp.phase="saving"; setBusy("Собираем файл…","Почти готово. Не сворачивайте страницу");
+          (function waitStop(){
+            if(rr._stopped||exp!==myExp) return;
+            var waited=(performance.now()-t0s)/1000;
+            if((rr.state==="inactive"&&rr._chunks.length&&waited>=8)||waited>=120){ if(rr.onstop) rr.onstop(); return; }
+            setTimeout(waitStop,1000);
+          })();
         }
       },250+Math.round(curDelay()*1000));
     };
