@@ -156,6 +156,8 @@ input[type=range]::-moz-range-thumb{width:23px;height:23px;border:0;border-radiu
 .busy .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 .busy .acts button{margin-top:0}
 .busy .primary{background:linear-gradient(115deg,var(--violet),var(--blue) 45%,var(--cyan));border-color:transparent}
+.busy .logbtn{margin-top:2px;padding:6px 10px;border:0;font-size:12px;font-weight:400;color:rgba(255,255,255,.7);text-decoration:underline}
+.logbtn-page{align-self:center;font-size:12px;color:var(--mute);text-decoration:underline;padding:6px}
 .busy .acts[hidden],.busy .bar[hidden],.busy button[hidden]{display:none}
 .exporting .formats,.exporting .controls,.exporting .btn,.exporting .zoom,.exporting .vbar,.exporting .theme{pointer-events:none;opacity:.5}
 
@@ -287,6 +289,7 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
         <div class="bar" id="busyBar"><i id="barFill"></i></div>
         <span id="busyTxt">Не сворачивайте страницу и не блокируйте экран</span>
         <button type="button" id="cancelBtn">Отмена</button>
+        <button type="button" class="logbtn" id="busyLog">Отчёт для разработчика</button>
         <div class="acts" id="doneActs" hidden>
           <button type="button" id="doneSave" class="primary">Сохранить видео</button>
           <button type="button" id="doneClose">Закрыть</button>
@@ -403,6 +406,7 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
     <p class="note">Выделите слова и нажмите на цвет, чтобы подсветить их. Текст на плашке всегда прописными.</p>
   </div>
 
+  <button type="button" class="logbtn logbtn-page" id="pageLog">Что-то не так? Отчёт для разработчика</button>
   <p class="note" id="iosHint" hidden>После «Сохранить» выберите в меню «Сохранить изображение» (для видео — «Сохранить видео»)</p>
 </div>
 
@@ -414,6 +418,59 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
 <input type="file" id="file" accept="image/*,video/*" hidden>
 <div class="toast" id="toast"></div>
 
+<script>
+window.APP_VERSION="2026-10-15";
+/* ---------- журнал для разработчика: что происходило в Постило (кнопка «Отчёт») ---------- */
+(function(){
+  var KEY="soyuzny.kadr.log", MAX=600, t0=Date.now(), LOG=[], prev=null, saveT=null;
+  try{ prev=JSON.parse(localStorage.getItem(KEY)||"null"); }catch(e){ prev=null; }
+  function pad(n,w){ n=String(n); while(n.length<(w||2)) n="0"+n; return n; }
+  function stamp(){ var d=new Date(); return pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds())+"."+pad(d.getMilliseconds(),3); }
+  function fmt(x){
+    if(x instanceof Error) return (x.name||"Error")+": "+x.message+(x.stack?" | "+String(x.stack).split("\n").slice(0,3).join(" / "):"");
+    if(x&&typeof x==="object"){
+      if(x.error instanceof Error) return fmt(x.error);
+      try{ var s=JSON.stringify(x); return s.length>400?s.slice(0,400)+"…":s; }catch(e){ return String(x); }
+    }
+    return String(x);
+  }
+  function save(){
+    saveT=null;
+    try{ localStorage.setItem(KEY,JSON.stringify({at:new Date().toISOString(),lines:LOG.slice(-300)})); }catch(e){}
+  }
+  function plog(){
+    var parts=[]; for(var i=0;i<arguments.length;i++) parts.push(fmt(arguments[i]));
+    LOG.push(stamp()+" "+parts.join(" "));
+    if(LOG.length>MAX) LOG.splice(0,LOG.length-MAX);
+    if(!saveT) saveT=setTimeout(save,400);
+  }
+  window.plog=plog;
+  window.plogNow=save;
+  window.plogReport=function(extra){
+    var n=navigator, s=screen||{};
+    var head=[
+      "ПОСТИЛО — отчёт для разработчика",
+      "Версия: "+(window.APP_VERSION||"?")+" · время отчёта: "+new Date().toString(),
+      "Браузер: "+n.userAgent,
+      "Платформа: "+(n.platform||"?")+" · касание: "+(n.maxTouchPoints||0)+" · экран: "+s.width+"×"+s.height+" @"+(window.devicePixelRatio||1),
+      "Адрес: "+location.href.split("?")[0]+" · https: "+(window.isSecureContext?"да":"нет")
+    ];
+    if(extra) head=head.concat(extra);
+    var out=head.concat(["","— Этот сеанс —"]).concat(LOG);
+    if(prev&&prev.lines&&prev.lines.length) out=out.concat(["","— Предыдущий сеанс ("+prev.at+") —"]).concat(prev.lines.slice(-150));
+    return out.join("\n");
+  };
+  window.addEventListener("error",function(e){ plog("ОШИБКА СТРАНИЦЫ:",e.message||"",(e.filename||"").split("/").pop()+":"+(e.lineno||"")+":"+(e.colno||""),e.error||""); });
+  window.addEventListener("unhandledrejection",function(e){ plog("НЕОБРАБОТАННАЯ ОШИБКА:",e.reason||""); });
+  ["warn","error"].forEach(function(k){
+    var orig=console[k];
+    console[k]=function(){ try{ plog.apply(null,[k==="warn"?"предупр.:":"ошибка:"].concat([].slice.call(arguments))); }catch(e){} return orig&&orig.apply(console,arguments); };
+  });
+  document.addEventListener("visibilitychange",function(){ plog("страница",document.hidden?"свёрнута":"на экране"); if(document.hidden) save(); });
+  window.addEventListener("pagehide",save);
+  plog("старт страницы");
+})();
+</script>
 <script>
 /* mp4box.js 0.5.3 — разбор MP4 (BSD-3-Clause, © Telecom ParisTech/TSI/MM/GPAC, Cyril Concolato) */
 /*! mp4box 02-11-2024 */
@@ -1595,6 +1652,7 @@ function grabStill(v){                           // первый кадр рол
   var c=snapFrame(v); if(c) v._still=c;
 }
 function useVideo(v){
+  plog("видео открыто:",v.videoWidth+"×"+v.videoHeight,"длительность",v.duration);
   stopLoop(); if(vid&&vid!==v){ try{vid.pause()}catch(e){} }
   var old=document.getElementById("vidEl"); if(old&&old!==v&&old.parentNode) old.parentNode.removeChild(old);
   vid=v; photo=v; isVideo=true; overlayCache=null; view={scale:1,x:0,y:0}; batch=[]; batchIdx=0;
@@ -1827,6 +1885,16 @@ function drawNow(){
   if(exporting&&exp&&exp.phase==="main"){
     setBar((exp.base+Math.max(0,vid.currentTime-exp.a))/exp.len);
     if(!exp.stopping&&vid.currentTime>=exp.b-0.005) exp.finish();
+    /* сторож: ролик перестал идти (так бывает в Safari у самого конца) — не висим на 99% */
+    if(!exp.stopping&&!leadStill){
+      var nowW=performance.now(), ct=vid.currentTime;
+      if(exp.lastCT!==ct||!exp.lastMove){ exp.lastCT=ct; exp.lastMove=nowW; }
+      else if(nowW-exp.lastMove>4000){
+        if(vid.ended||ct>=exp.b-1.5){ plog("сторож: ролик встал у конца",ct.toFixed(2),"из",exp.b.toFixed(2),"— завершаем"); exp.finish(); }
+        else if(!exp.kicked){ exp.kicked=true; plog("сторож: ролик встал на",ct.toFixed(2),"— запускаем снова"); try{ var kp=vid.play(); if(kp&&kp.catch) kp.catch(function(){}); }catch(e){} }
+        else if(nowW-exp.lastMove>15000){ plog("сторож: ролик стоит 15 с — сохраняем то, что успели"); exp.finish(); }
+      }
+    }
     if(exp.keep&&!exp.fadeOut&&vid._cg&&AC&&vid.currentTime>=exp.b-exp.fade){
       exp.fadeOut=true;
       var g=vid._cg.gain, t=AC.currentTime, left=Math.max(0.02,exp.b-vid.currentTime);
@@ -1922,6 +1990,7 @@ function endExport(){
 }
 function cancelExport(msg){
   if(!exp) return;
+  plog("ОТМЕНА:",msg||"нажата «Отмена»","фаза",exp.phase);
   exp.cancelled=true;
   if(msg) toast(msg,7000);
   var rec=exp.rec;
@@ -2022,6 +2091,14 @@ var FAST_MAX_BYTES=700*1048576;           // крупнее — целиком �
 var fastOn=read("fast")!=="0";
 var curVideoFile=null, fastT=null;
 function fastSleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+/* ожидание с пределом: если браузер не ответил за ms — идём дальше (или ошибка, если strict) */
+function fastWait(pr,ms,label,strict){
+  return new Promise(function(res,rej){
+    var done=false;
+    var t=setTimeout(function(){ if(done) return; done=true; plog("быстрое: не дождались",label,"за",ms,"мс"); if(strict) rej(new Error("зависло: "+label)); else res("timeout"); },ms);
+    pr.then(function(v){ if(done) return; done=true; clearTimeout(t); res(v); },function(e){ if(done) return; done=true; clearTimeout(t); rej(e); });
+  });
+}
 
 /* NAL-блоки H.264: из Annex B (00 00 01) или из формата с длинами (MP4) */
 function fastNals(u){
@@ -2133,9 +2210,12 @@ async function fastExport(segs,join,myExp,onProgress){
   var file=curVideoFile;
   if(!file) throw new Error("нет исходного файла");
   if(file.size>FAST_MAX_BYTES) throw new Error("файл больше "+Math.round(FAST_MAX_BYTES/1048576)+" МБ");
+  plog("быстрое: разбор файла",file.name,Math.round(file.size/1048576)+" МБ");
   var pr=await fastProbe(file);
   if(myExp.cancelled) return null;
   var info=pr.info, vt=info.videoTracks[0], at=info.audioTracks[0];
+  plog("быстрое: дорожки", vt?("видео "+vt.codec+" "+vt.video.width+"×"+vt.video.height+" сэмплов "+(pr.samples[vt.id]||[]).length):"нет видео",
+    at?("| звук "+at.codec+" "+at.audio.sample_rate+" Гц "+at.audio.channel_count+" кан. сэмплов "+(pr.samples[at.id]||[]).length):"| звука нет");
   if(!vt) throw new Error("нет видеодорожки");
   var W=cur.w, H=cur.h;
   /* декодер видео */
@@ -2164,6 +2244,7 @@ async function fastExport(segs,join,myExp,onProgress){
     if(!aencCfg) throw new Error("браузер не сжимает звук в AAC");
   }
   var rot=fastRotation(vt), vShift=fastShift(vt,info.timescale), aShift=at?fastShift(at,info.timescale):0;
+  plog("быстрое: кодеры",vencCfg.codec,W+"×"+H,"звук",aCodec||"нет","поворот",rot,"сдвиги",vShift.toFixed(3),aShift.toFixed(3));
   var vS=pr.samples[vt.id], aS=at?pr.samples[at.id]:[];
   function vpts(s){ return s.cts/s.timescale+vShift; }
   function apts(s){ return s.cts/s.timescale+aShift; }
@@ -2240,7 +2321,7 @@ async function fastExport(segs,join,myExp,onProgress){
         var vf=new VideoFrame(cv,{timestamp:Math.round((outOff+(t-A))*1e6)});
         venc.encode(vf,{keyFrame:frameNo%60===0}); vf.close(); frameNo++;
         fr.close();
-        onProgress((doneLen+(t-A))/totalLen);
+        onProgress((doneLen+(t-A))/totalLen*0.85);
       };
       for(var k2=k0;k2<vS.length;k2++){
         if(myExp.cancelled||err) break;
@@ -2249,11 +2330,15 @@ async function fastExport(segs,join,myExp,onProgress){
         vdec.decode(new EncodedVideoChunk({type:s.is_sync?"key":"delta",timestamp:Math.round(pts*1e6),
           duration:Math.round(s.duration/s.timescale*1e6),data:s.data}));
         while(pending.length) drawFrame(pending.shift());
-        while(!myExp.cancelled&&!err&&(vdec.decodeQueueSize>6||venc.encodeQueueSize>6)){
-          await fastSleep(4); while(pending.length) drawFrame(pending.shift());
+        var qw=0;
+        while(!myExp.cancelled&&!err&&(vdec.decodeQueueSize>6||venc.encodeQueueSize>6)&&qw<1500){
+          await fastSleep(4); qw++; while(pending.length) drawFrame(pending.shift());
         }
+        if(qw>=1500) plog("быстрое: очередь не разгружалась 6 с — продолжаем",vdec.decodeQueueSize,venc.encodeQueueSize);
       }
-      if(!myExp.cancelled&&!err){ await vdec.flush(); while(pending.length) drawFrame(pending.shift()); }
+      plog("быстрое: кусок",si+1,"видео подано, кадров в файл",frameNo);
+      if(!myExp.cancelled&&!err){ await fastWait(vdec.flush(),10000,"видеодекодер (flush)"); while(pending.length) drawFrame(pending.shift()); }
+      plog("быстрое: кусок",si+1,"видео готово, кадров",frameNo);
       while(pending.length) pending.shift().close();
       try{ vdec.close(); }catch(e){}
       if(myExp.cancelled) break;
@@ -2275,6 +2360,7 @@ async function fastExport(segs,join,myExp,onProgress){
           var ad=new AudioData({format:"f32-planar",sampleRate:sr,numberOfFrames:len,numberOfChannels:outCh,
             timestamp:Math.round((startSample+outPos)/sr*1e6),data:data});
           aenc.encode(ad); ad.close(); outPos+=len;
+          onProgress(0.85*(doneLen+SL)/totalLen+0.15*(doneLen+outPos/sr)/totalLen,"звук");
         };
         var pushAudio=function(d){
           var n=d.numberOfFrames, nc=d.numberOfChannels;
@@ -2306,7 +2392,8 @@ async function fastExport(segs,join,myExp,onProgress){
           while(adOut.length) pushAudio(adOut.shift());
           if(adec.decodeQueueSize>20||aenc.encodeQueueSize>20){ await fastSleep(2); while(adOut.length) pushAudio(adOut.shift()); }
         }
-        if(!myExp.cancelled&&!err){ await adec.flush(); while(adOut.length) pushAudio(adOut.shift()); }
+        if(!myExp.cancelled&&!err){ await fastWait(adec.flush(),10000,"аудиодекодер (flush)"); while(adOut.length) pushAudio(adOut.shift()); }
+        plog("быстрое: кусок",si+1,"звук готов, отсчётов",outPos,"из",want);
         while(adOut.length) adOut.shift().close();
         try{ adec.close(); }catch(e){}
         /* если звука в файле меньше, чем картинки, — добиваем тишиной */
@@ -2318,7 +2405,9 @@ async function fastExport(segs,join,myExp,onProgress){
       outOff+=SL; titrBase+=SL; doneLen+=SL;
     }
     if(myExp.cancelled){ try{ venc.close(); }catch(e){} try{ aenc&&aenc.close(); }catch(e){} return null; }
-    await venc.flush(); if(aenc) await aenc.flush();
+    plog("быстрое: дожимаем кодеры"); onProgress(1,"сборка файла");
+    await fastWait(venc.flush(),20000,"видеокодер (flush)",true); if(aenc) await fastWait(aenc.flush(),20000,"аудиокодер (flush)",true);
+    plog("быстрое: собираем MP4");
     try{ venc.close(); }catch(e){} try{ aenc&&aenc.close(); }catch(e){}
     if(err) throw err;
     muxer.finalize();
@@ -2352,24 +2441,28 @@ function exportVideo(){
   setBusy("Быстрое сохранение…","Разбираем ролик");
   vid.pause(); stopLoop(); previewSound();
   try{ if(navigator.wakeLock) navigator.wakeLock.request("screen").then(function(w){ if(exp) exp.wake=w; else w.release(); }).catch(function(){}); }catch(e){}
-  var lastUi=0;
-  fastExport(segs,join,myExp,function(f){
+  var lastUi=0, lastLog=-1;
+  plog("СОХРАНЕНИЕ (быстрое): кусков",segs.length,"склейка",join,"длина",L.toFixed(1),"формат",cur.id);
+  fastExport(segs,join,myExp,function(f,stage){
+    var dec=Math.floor(f*10); if(dec!==lastLog){ lastLog=dec; plog("быстрое: прогресс",Math.round(f*100)+"%"); }
     var now=performance.now(); if(now-lastUi<120) return; lastUi=now;
     var fr=Math.max(0,Math.min(1,f)), pc=Math.round(fr*100);
     document.getElementById("barFill").style.width=pc+"%";
     var el=(now-t0)/1000, rem=fr>0.03?el*(1-fr)/fr:0;
-    setBusy("Быстрое сохранение · "+pc+"%",(rem>=1?"Осталось около "+fmtTime(rem)+". ":"")+"Не сворачивайте страницу");
+    setBusy("Быстрое сохранение · "+(stage?stage+" · ":"")+pc+"%",(rem>=1?"Осталось около "+fmtTime(rem)+". ":"")+"Не сворачивайте страницу");
   }).then(function(outs){
     fastT=null; leadStill=null;
     if(myExp.cancelled||!outs){ if(exp===myExp) endExport(); return; }
     endExport();
     window.__fastUsed=true;
+    plog("быстрое: готово, файлов",outs.length,"размер",outs.map(function(o){ return Math.round(o.blob.size/1024)+" КБ"; }).join(", "));
     var note="Быстрое сохранение: звук и картинка взяты из файла по точному времени.";
     if(outs.length===1) showDone(outs[0].blob,outs[0].name,L,note); else showDoneMany(outs,L,note);
   }).catch(function(e){
     fastT=null; leadStill=null;
     var msg=(e&&e.message)||String(e);
     console.warn("Быстрое сохранение не удалось:",e);
+    plog("быстрое: ОТКАЗ →",msg,"→ переходим на обычную запись");
     window.__fastFail=msg;
     if(myExp.cancelled){ if(exp===myExp) endExport(); return; }
     endExport();
@@ -2379,6 +2472,7 @@ function exportVideo(){
 }
 function exportVideoRT(){
   if(exporting||!isVideo||!vid) return;
+  plog("СОХРАНЕНИЕ (в реальном времени): MP4",pickMime()||"нет","фрагмент",fmtT(trim.a)+"–"+fmtT(trim.b),"в списке",frags.length,"формат",cur.id);
   if(!window.MediaRecorder||!cv.captureStream){
     toast("Этот браузер не умеет записывать видео. Откройте страницу в Chrome или Safari",7500); return;
   }
@@ -2522,10 +2616,14 @@ function exportVideoRT(){
       chunks=[]; rec=newRec(); if(!rec) return false;
       exp.rec=rec;
       var myChunks=chunks, r=rec; r._chunks=myChunks;
-      rec.ondataavailable=function(e){ if(e.data&&e.data.size) myChunks.push(e.data); };
+      rec.ondataavailable=function(e){
+        if(e.data&&e.data.size){ myChunks.push(e.data); if(myChunks.length===1||myChunks.length%15===0) plog("запись: кусков данных",myChunks.length,"последний",Math.round(e.data.size/1024)+" КБ"); }
+        else plog("запись: пришёл пустой кусок данных");
+      };
       rec.onerror=function(e){ cancelExport("Ошибка записи: "+((e&&e.error&&e.error.message)||"неизвестная")); };
       rec.onstop=function(){
         if(r._stopped) return; r._stopped=true;
+        plog("запись: остановлена, кусков",myChunks.length,"байт",myChunks.reduce(function(s,b){ return s+b.size; },0),"тип",r.mimeType);
         if(myExp.cancelled){ stream.getVideoTracks().forEach(function(t){ t.stop() }); endExport(); return; }
         var type=r.mimeType||mime;
         if(!myChunks.length){ stream.getVideoTracks().forEach(function(t){ t.stop() }); endExport(); toast("Запись получилась пустой. Попробуйте ещё раз",7000); return; }
@@ -2558,7 +2656,7 @@ function exportVideoRT(){
     /* играем кусок si; fresh — нужна новая запись (первый кусок или «отдельными файлами») */
     function playSeg(fresh){
       var sg=SEGS[si];
-      exp.a=sg.a; exp.b=sg.b; exp.stopping=false; exp.fadeOut=false;
+      exp.a=sg.a; exp.b=sg.b; exp.stopping=false; exp.fadeOut=false; exp.lastMove=0; exp.kicked=false;
       exp.fade=Math.min(FADE_SEC,(sg.b-sg.a)/4);
       if(!JOIN){ exp.base=SEGS.slice(0,si).reduce(function(s,g){ return s+g.b-g.a; },0); exp.tbase=0; }
       if(vid._cg){ try{ vid._cg.gain.cancelScheduledValues(0); }catch(e){} vid._cg.gain.value=0; }
@@ -2571,7 +2669,7 @@ function exportVideoRT(){
         renderVideoFrame(); startLoop();
         if(fresh){
           if(!makeRec()) return;
-          try{ rec.start(1000) }catch(e){ cancelExport("Не удалось начать запись"); return; }
+          try{ rec.start(1000); plog("запись: старт",rec.mimeType,"кусок",si+1); }catch(e){ plog("запись: не стартовала",e); cancelExport("Не удалось начать запись"); return; }
           if(si===0||!JOIN){ exp.w0=performance.now(); exp.ac0=AC?AC.currentTime:0; exp.slip=0; }
         }else if(CAN_PAUSE&&rec.state==="paused"){ try{ rec.resume(); }catch(e){} }
         waitDraws(fresh?8:4,1500,function(){
@@ -2582,6 +2680,7 @@ function exportVideoRT(){
     }
     exp.finish=function(){                         // дошли до конца куска
       if(exp!==myExp||myExp.stopping) return;
+      plog("запись: конец куска",si+1,"время ролика",vid.currentTime.toFixed(2),"конец",exp.b.toFixed(2),"ended",vid.ended);
       myExp.stopping=true;
       vid.pause(); renderVideoFrame();
       var segLen=SEGS[si].b-SEGS[si].a;
@@ -2594,7 +2693,8 @@ function exportVideoRT(){
           playSeg(false);
         }else{
           if(si===SEGS.length-1) setBar(1);
-          try{ if(rec.state!=="inactive") rec.stop() }catch(e){}
+          plog("запись: останавливаем, состояние",rec.state);
+          try{ if(rec.state!=="inactive") rec.stop() }catch(e){ plog("запись: stop() ошибка",e); }
           /* Safari отдаёт весь файл только после остановки и на длинном ролике может собирать его долго.
              Ждём; если браузер так и не сообщил об остановке — собираем файл из того, что пришло. */
           var rr=rec, t0s=performance.now();
@@ -2602,7 +2702,8 @@ function exportVideoRT(){
           (function waitStop(){
             if(rr._stopped||exp!==myExp) return;
             var waited=(performance.now()-t0s)/1000;
-            if((rr.state==="inactive"&&rr._chunks.length&&waited>=8)||waited>=120){ if(rr.onstop) rr.onstop(); return; }
+            if(Math.round(waited)%5===0) plog("запись: ждём файл от браузера",Math.round(waited),"с, состояние",rr.state,"кусков",rr._chunks.length);
+            if((rr.state==="inactive"&&rr._chunks.length&&waited>=8)||waited>=120){ plog("запись: не дождались события остановки — собираем сами"); if(rr.onstop) rr.onstop(); return; }
             setTimeout(waitStop,1000);
           })();
         }
@@ -2638,6 +2739,7 @@ function exportVideoRT(){
    сразу после нажатия пальцем, а после нескольких минут записи Safari его бы заблокировал. */
 var doneBlob=null, doneName="";
 function showDone(blob,name,durSec,note){
+  plog("ГОТОВО:",name,Math.round(blob.size/1024)+" КБ",note||"");
   doneBlob=blob; doneName=name;
   document.getElementById("busyTitle").textContent="Видео готово";
   document.getElementById("busyBar").hidden=true;
@@ -2667,12 +2769,33 @@ function hideDone(){
   document.getElementById("doneActs").hidden=true;
 }
 document.getElementById("doneSave").onclick=function(){
+  plog("нажато «Сохранить видео»");
   if(doneItems){ deliverMany(doneItems); return; }
   if(!doneBlob) return;
   deliverBlob(doneBlob,doneName,"video/mp4");
 };
 document.getElementById("doneClose").onclick=hideDone;
 document.getElementById("cancelBtn").onclick=function(){ cancelExport(); };
+/* отчёт: копируем в буфер и отдаём файлом — его можно сразу переслать в чат */
+function sendReport(){
+  var extra=[];
+  try{
+    extra.push("Состояние: "+(exporting?"идёт сохранение ("+(exp&&exp.phase)+")":"ожидание")+" · формат "+cur.id+" · макет "+layoutId);
+    if(vid) extra.push("Видео: "+(curVideoFile?curVideoFile.name+" · "+curVideoFile.type+" · "+Math.round(curVideoFile.size/1048576)+" МБ":"?")+
+      " · "+vid.videoWidth+"×"+vid.videoHeight+" · "+fmtT(dur())+" · сейчас "+fmtT(vid.currentTime)+(vid.paused?" (пауза)":"")+
+      " · фрагмент "+fmtT(trim.a)+"–"+fmtT(trim.b)+(frags.length?" · в списке "+frags.length:""));
+    extra.push("Быстрое сохранение: доступно "+(FAST_API?"да":"нет")+", включено "+(fastOn?"да":"нет")+" · MediaRecorder: "+(window.MediaRecorder?(pickMime()||"нет MP4"):"нет"));
+    extra.push("Надпись на экране: "+document.getElementById("busyTitle").textContent+" | "+document.getElementById("busyTxt").textContent);
+  }catch(e){ extra.push("(не удалось собрать состояние: "+e.message+")"); }
+  var text=window.plogReport?window.plogReport(extra):extra.join("\n");
+  try{ if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function(){}); }catch(e){}
+  var d=new Date(), p2=function(n){ return String(n).padStart(2,"0"); };
+  var name="postilo_otchet_"+d.getFullYear()+p2(d.getMonth()+1)+p2(d.getDate())+"_"+p2(d.getHours())+p2(d.getMinutes())+".txt";
+  deliverBlob(new Blob([text],{type:"text/plain"}),name,"text/plain");
+  toast("Отчёт скопирован и сохранён файлом — пришлите его в чат",5000);
+}
+document.getElementById("busyLog").onclick=sendReport;
+document.getElementById("pageLog").onclick=sendReport;
 
 function shrinkImage(img,max){
   var w=sw(img), h=sh(img), m=Math.max(w,h); if(m<=max) return img;
@@ -2716,6 +2839,7 @@ function addToCollage(list){
 
 file.onchange=function(ev,given){
   var list=given||[].slice.call(file.files||[]); if(!list.length)return;
+  plog("выбраны файлы:",list.map(function(f){ return (f.name||"?")+" ("+(f.type||"?")+", "+Math.round((f.size||0)/1024)+" КБ)"; }).join("; "));
   if(exporting){ file.value=""; return; }
   hideDone();
   if(isCollage()){ addToCollage(list); file.value=""; return; }
