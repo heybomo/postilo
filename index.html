@@ -419,7 +419,7 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
 <div class="toast" id="toast"></div>
 
 <script>
-window.APP_VERSION="2026-10-15";
+window.APP_VERSION="2026-10-16";
 /* ---------- журнал для разработчика: что происходило в Постило (кнопка «Отчёт») ---------- */
 (function(){
   var KEY="soyuzny.kadr.log", MAX=600, t0=Date.now(), LOG=[], prev=null, saveT=null;
@@ -2136,6 +2136,34 @@ function fastAsc(sr,ch){                            // AudioSpecificConfig дл�
   return new Uint8Array([(2<<3)|(fi>>1),((fi&1)<<7)|(ch<<3)]);
 }
 
+/* Самопроверка звука: раскодировать сжатые кусочки около самого громкого места и измерить громкость.
+   Возвращает пик (0…1) или -1, если проверить нельзя. */
+async function fastCheckAudio(chunks,desc,sr,ch,tPeak,codec){
+  try{
+    var cfg={codec:codec,sampleRate:sr,numberOfChannels:ch}; if(desc) cfg.description=desc;
+    if(!(await AudioDecoder.isConfigSupported(cfg)).supported) return -1;
+    var peak=0, bad=false, dec=new AudioDecoder({output:function(d){
+      try{
+        for(var c=0;c<d.numberOfChannels;c++){
+          var b=new Float32Array(d.numberOfFrames); d.copyTo(b,{planeIndex:c,format:"f32-planar"});
+          for(var i=0;i<b.length;i++){ var a=Math.abs(b[i]); if(a>peak&&a<=4) peak=a; }
+        }
+      }catch(e){ bad=true; }
+      d.close();
+    },error:function(){ bad=true; }});
+    dec.configure(cfg);
+    var t0=(tPeak-3)*1e6, t1=(tPeak+3)*1e6, n=0;
+    for(var i=0;i<chunks.length;i++){
+      var c0=chunks[i]; if(c0.t<t0||c0.t>t1) continue;
+      dec.decode(new EncodedAudioChunk({type:"key",timestamp:c0.t,duration:c0.u,data:c0.d})); n++;
+    }
+    await fastWait(dec.flush(),5000,"проверка звука");
+    try{ dec.close(); }catch(e){}
+    if(bad||!n) return -1;
+    return peak;
+  }catch(e){ plog("быстрое: проверка звука не удалась",e&&e.message||e); return -1; }
+}
+
 /* разбор MP4/MOV: дорожки, их настройки и все сэмплы */
 function fastProbe(file){
   return new Promise(function(resolve,reject){
@@ -2284,18 +2312,35 @@ async function fastExport(segs,join,myExp,onProgress){
     venc.configure(vencCfg);
     var aenc=null;
     if(aencCfg){
-      var aSent=false;
+      var aSent=false, aDesc=null, aChunks=[], aAdts=0;
       aenc=new AudioEncoder({output:function(ch,meta){
         try{
-          if(!aSent&&aCodec==="aac"&&!(meta&&meta.decoderConfig&&meta.decoderConfig.description)){
-            meta={decoderConfig:{codec:"mp4a.40.2",sampleRate:sr,numberOfChannels:outCh,description:fastAsc(sr,outCh)}};
+          var buf=new Uint8Array(ch.byteLength); ch.copyTo(buf);
+          /* некоторые браузеры отдают AAC с ADTS-заголовком — в MP4 его быть не должно */
+          if(aCodec==="aac"&&buf.length>7&&buf[0]===0xFF&&(buf[1]&0xF6)===0xF0&&(((buf[3]&3)<<11)|(buf[4]<<3)|(buf[5]>>5))===buf.length){
+            var hl=(buf[1]&1)?7:9; buf=buf.subarray(hl); aAdts++;
           }
-          aSent=true; muxer.addAudioChunk(ch,meta);
+          var m=undefined;
+          if(!aSent){
+            aSent=true;
+            var d0=meta&&meta.decoderConfig&&meta.decoderConfig.description, dd=null;
+            if(d0) dd=new Uint8Array(d0.buffer?d0.buffer.slice(d0.byteOffset||0,(d0.byteOffset||0)+d0.byteLength):d0);
+            if(aCodec==="aac"){
+              var mine=fastAsc(sr,outCh), ok=dd&&dd.length>=2&&(dd[0]>>3)===2&&(((dd[0]&7)<<1)|(dd[1]>>7))===(((mine[0]&7)<<1)|(mine[1]>>7))&&((dd[1]>>3)&15)===outCh;
+              plog("быстрое: описание звука от кодека",dd?Array.from(dd).map(function(x){ return (x<16?"0":"")+x.toString(16); }).join(" "):"нет",
+                ok?"— годится":"— берём своё","ADTS",buf!==null&&aAdts?"да":"нет");
+              aDesc=ok?dd:mine;
+            }else aDesc=dd;
+            m={decoderConfig:{codec:aCodec==="aac"?"mp4a.40.2":"opus",sampleRate:sr,numberOfChannels:outCh,description:aDesc}};
+          }
+          if(window.__breakAudio) buf=new Uint8Array(buf.length);   // только для тестов: испорченный звук
+          aChunks.push({d:buf,t:ch.timestamp,u:ch.duration||0});
+          muxer.addAudioChunkRaw(buf,ch.type,ch.timestamp,ch.duration||0,m);
         }catch(e){ err=e; }
       },error:function(e){ err=e; }});
       aenc.configure(aencCfg);
     }
-    var outOff=0, frameNo=0, titrBase=0;
+    var outOff=0, frameNo=0, titrBase=0, inPeak=0, sentPeak=0, sentPeakT=0;
     for(var si=0;si<grp.length;si++){
       var sg=grp[si], A=sg.a, B=sg.b, SL=B-A, fade=Math.min(FADE_SEC,SL/4);
       /* ---- видео куска ---- */
@@ -2354,7 +2399,8 @@ async function fastExport(segs,join,myExp,onProgress){
             var pl=planes?planes[c2]:null;
             for(var q=0;q<len;q++){
               var ts=(outPos+q)/sr, g=keep?Math.max(0,Math.min(1,ts/fade,(SL-ts)/fade)):0;
-              data[c2*len+q]=pl?pl[q]*g:0;
+              var vv=pl?pl[q]*g:0; data[c2*len+q]=vv;
+              if(pl){ var av=Math.abs(pl[q]); if(av>inPeak) inPeak=av; if(av*g>sentPeak){ sentPeak=av*g; sentPeakT=(startSample+outPos+q)/sr; } }
             }
           }
           var ad=new AudioData({format:"f32-planar",sampleRate:sr,numberOfFrames:len,numberOfChannels:outCh,
@@ -2393,7 +2439,7 @@ async function fastExport(segs,join,myExp,onProgress){
           if(adec.decodeQueueSize>20||aenc.encodeQueueSize>20){ await fastSleep(2); while(adOut.length) pushAudio(adOut.shift()); }
         }
         if(!myExp.cancelled&&!err){ await fastWait(adec.flush(),10000,"аудиодекодер (flush)"); while(adOut.length) pushAudio(adOut.shift()); }
-        plog("быстрое: кусок",si+1,"звук готов, отсчётов",outPos,"из",want);
+        plog("быстрое: кусок",si+1,"звук готов, отсчётов",outPos,"из",want,"звук ролика",keep?"вкл":"ВЫКЛ","громкость файла",inPeak.toFixed(3),"в запись",sentPeak.toFixed(3));
         while(adOut.length) adOut.shift().close();
         try{ adec.close(); }catch(e){}
         /* если звука в файле меньше, чем картинки, — добиваем тишиной */
@@ -2407,6 +2453,15 @@ async function fastExport(segs,join,myExp,onProgress){
     if(myExp.cancelled){ try{ venc.close(); }catch(e){} try{ aenc&&aenc.close(); }catch(e){} return null; }
     plog("быстрое: дожимаем кодеры"); onProgress(1,"сборка файла");
     await fastWait(venc.flush(),20000,"видеокодер (flush)",true); if(aenc) await fastWait(aenc.flush(),20000,"аудиокодер (flush)",true);
+    if(aenc&&!err&&!myExp.cancelled){
+      if(aAdts) plog("быстрое: сняты ADTS-заголовки у",aAdts,"кусочков звука");
+      if(!aChunks.length) throw new Error("кодек не выдал звук");
+      if(sentPeak>0.02){
+        var vPeak=await fastCheckAudio(aChunks,aDesc,sr,outCh,sentPeakT,aCodec==="aac"?"mp4a.40.2":"opus");
+        plog("быстрое: проверка звука — громкость после сжатия",vPeak<0?"не разобрать":vPeak.toFixed(3),"до",sentPeak.toFixed(3));
+        if(vPeak>=0&&vPeak<sentPeak*0.05) throw new Error("звук после сжатия получился пустым");
+      }
+    }
     plog("быстрое: собираем MP4");
     try{ venc.close(); }catch(e){} try{ aenc&&aenc.close(); }catch(e){}
     if(err) throw err;
@@ -2784,6 +2839,7 @@ function sendReport(){
     if(vid) extra.push("Видео: "+(curVideoFile?curVideoFile.name+" · "+curVideoFile.type+" · "+Math.round(curVideoFile.size/1048576)+" МБ":"?")+
       " · "+vid.videoWidth+"×"+vid.videoHeight+" · "+fmtT(dur())+" · сейчас "+fmtT(vid.currentTime)+(vid.paused?" (пауза)":"")+
       " · фрагмент "+fmtT(trim.a)+"–"+fmtT(trim.b)+(frags.length?" · в списке "+frags.length:""));
+    if(isVideo) extra.push("Звук ролика в записи: "+(keepAudioBox.checked?"включён":"ВЫКЛЮЧЕН"));
     extra.push("Быстрое сохранение: доступно "+(FAST_API?"да":"нет")+", включено "+(fastOn?"да":"нет")+" · MediaRecorder: "+(window.MediaRecorder?(pickMime()||"нет MP4"):"нет"));
     extra.push("Надпись на экране: "+document.getElementById("busyTitle").textContent+" | "+document.getElementById("busyTxt").textContent);
   }catch(e){ extra.push("(не удалось собрать состояние: "+e.message+")"); }
