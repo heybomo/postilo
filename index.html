@@ -420,7 +420,7 @@ footer{position:sticky;bottom:0;z-index:4;flex:none;background:var(--bg);border-
 <div class="toast" id="toast"></div>
 
 <script>
-window.APP_VERSION="2026-10-20";
+window.APP_VERSION="2026-10-22";
 /* ---------- журнал для разработчика: что происходило в Постило (кнопка «Отчёт») ---------- */
 (function(){
   var KEY="soyuzny.kadr.log", MAX=600, t0=Date.now(), LOG=[], prev=null, saveT=null;
@@ -525,7 +525,8 @@ var FORMATS=[
   {id:"9x16",label:"9:16", w:1080,h:1920}
 ];
 var NONE="без рубрики";
-var RUBRICS=["Политика","Общество","Происшествия","Экономика","Союзное государство",NONE];
+var RUBRICS=["Политика","Общество","Происшествия","Экономика","Спорт","Союзное государство",NONE];
+var RUBRICS_V1=["Политика","Общество","Происшествия","Экономика","Союзное государство",NONE];   // старый порядок: раньше запоминался номер
 
 var K="soyuzny.kadr.";
 var cur=FORMATS[0], rubric=RUBRICS[0], source="";
@@ -1408,7 +1409,7 @@ var rubSel=document.getElementById("rub");
 RUBRICS.forEach(function(r,i){
   var o=document.createElement("option"); o.value=i; o.textContent=r; rubSel.appendChild(o);
 });
-rubSel.onchange=function(){ rubric=RUBRICS[+this.value]; save("rub",this.value); render(); };
+rubSel.onchange=function(){ rubric=RUBRICS[+this.value]; save("rubName",rubric); render(); };
 
 var srcInput=document.getElementById("src");
 srcInput.oninput=function(){ source=this.value.trim(); save("src",this.value); render(); };
@@ -3168,7 +3169,8 @@ var sf=read("fmt");
 if(sf) FORMATS.forEach(function(f,i){ if(f.id===sf){cur=f;
   [].forEach.call(nav.children,function(el,j){el.setAttribute("aria-pressed",j===i)}); }});
 var sr=read("rub");
-if(sr!==null&&RUBRICS[+sr]){rubric=RUBRICS[+sr];rubSel.value=sr}
+var srn=read("rubName"); if(srn===null&&sr!==null&&RUBRICS_V1[+sr]) srn=RUBRICS_V1[+sr];   // переносим старую настройку
+if(srn!==null&&RUBRICS.indexOf(srn)>=0){rubric=srn;rubSel.value=RUBRICS.indexOf(srn)}
 var ss=read("src");
 if(ss){srcInput.value=ss;source=ss.trim()}
 if(read("wm")==="1"){wmOn=true;wmBox.checked=true}
