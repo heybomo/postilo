@@ -1628,32 +1628,64 @@ function fmtT(s){                          // 1:05.3 — с десятыми, д
   return m+":"+(r<10?"0":"")+r.toFixed(1);
 }
 function dur(){ return vid&&isFinite(vid.duration)?vid.duration:0; }
-function dropVideoEl(){ var o=document.getElementById("vidEl"); if(o&&o.parentNode) o.parentNode.removeChild(o); }
+function releaseVideo(v){
+  var url=v.src;
+  v.removeAttribute("src");
+  v.remove();
+  if(url.indexOf("blob:")===0) URL.revokeObjectURL(url);
+}
+function dropVideoEl(){ var o=document.getElementById("vidEl"); if(o) releaseVideo(o); }
 
 function loadVideo(f){
   return new Promise(function(resolve,reject){
     var v=document.createElement("video"), done=false;
-    v.id="vidEl"; v.muted=true; v.playsInline=true; v.preload="auto";
+    v.muted=true; v.playsInline=true; v.preload="auto";
     v.setAttribute("playsinline",""); v.setAttribute("webkit-playsinline","");
     v.style.cssText="position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
     var guard=setTimeout(function(){ fail(new Error("timeout")) },25000);
     function ok(){ if(done)return; done=true; clearTimeout(guard); resolve(v) }
-    function fail(e){ if(done)return; done=true; clearTimeout(guard); if(v.parentNode) v.parentNode.removeChild(v); reject(e) }
-    v.onerror=function(){ fail(new Error("decode")) };
+    function fail(e){ if(done)return; done=true; clearTimeout(guard); releaseVideo(v); reject(e) }
+    v.onerror=function(){ fail(new Error(v.error?"media "+v.error.code+" "+v.error.message:"decode")) };
     v.onloadedmetadata=function(){
       if(!v.videoWidth){ fail(new Error("decode")); return }
       try{ v.currentTime=Math.min(0.05,(v.duration||1)/2) }catch(e2){}
-      setTimeout(ok,1500);               // запасной выход, если кадр так и не пришёл
     };
     v.onloadeddata=function(){ if(v.videoWidth) ok(); };
+    v.onseeked=function(){ if(v.videoWidth&&v.readyState>=2) ok(); };
     document.body.appendChild(v);
     v.src=URL.createObjectURL(f);
     v.load();
   });
 }
-function explainVideo(f,e){
-  if(f.size===0) return "Файл пустой. Если он лежит в облаке, сначала скачайте его на устройство";
-  return "Браузер не смог прочитать это видео. Чаще всего дело в формате (например, HEVC с айфона на компьютере). Откройте страницу на айфоне или пересохраните ролик в MP4 (H.264)";
+var importingVideo=false;
+async function convertVideo(f){
+  toast("Готовим видео для браузера…",60000);
+  var ffmpeg=new window.FFmpegWASM.FFmpeg();
+  var startup=setTimeout(function(){ ffmpeg.terminate(); },90000);
+  try{
+    // Однопоточное ядро работает на GitHub Pages без cross-origin isolation.
+    await ffmpeg.load({coreURL:"https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js"});
+    clearTimeout(startup);
+    await ffmpeg.createDir("/source");
+    var mounted=await ffmpeg.mount("WORKERFS",{blobs:[{name:"video",data:f}]},"/source");
+    if(!mounted) await ffmpeg.writeFile("/input",new Uint8Array(await f.arrayBuffer()));
+    ffmpeg.on("progress",function(p){
+      var percent=Math.min(99,Math.max(0,Math.floor(p.progress*100)));
+      if(isFinite(percent)) toast("Готовим видео для браузера… "+percent+"%",60000);
+    });
+    var status=await ffmpeg.exec([
+      "-i",mounted?"/source/video":"/input","-map","0:v:0","-map","0:a:0?",
+      "-vf","bwdif=mode=send_frame:deint=interlaced,pad=ceil(iw/2)*2:ceil(ih/2)*2",
+      "-c:v","libx264","-preset","ultrafast","-crf","20","-pix_fmt","yuv420p",
+      "-c:a","aac","-b:a","160k","-movflags","+faststart","/compatible.mp4"
+    ]);
+    if(status!==0) throw new Error("FFmpeg: "+status);
+    var data=await ffmpeg.readFile("/compatible.mp4");
+    return new File([data],f.name.replace(/\.[^.]+$/,"")+".mp4",{type:"video/mp4"});
+  }finally{
+    clearTimeout(startup);
+    ffmpeg.terminate();
+  }
 }
 function snapFrame(v){                           // копия текущего кадра ролика
   if(!v||!v.videoWidth||v.readyState<2) return null;
@@ -1669,7 +1701,8 @@ function grabStill(v){                           // первый кадр рол
 function useVideo(v){
   plog("видео открыто:",v.videoWidth+"×"+v.videoHeight,"длительность",v.duration);
   stopLoop(); if(vid&&vid!==v){ try{vid.pause()}catch(e){} }
-  var old=document.getElementById("vidEl"); if(old&&old!==v&&old.parentNode) old.parentNode.removeChild(old);
+  var old=document.getElementById("vidEl"); if(old&&old!==v) releaseVideo(old);
+  v.id="vidEl";
   vid=v; photo=v; isVideo=true; overlayCache=null; view={scale:1,x:0,y:0}; batch=[]; batchIdx=0;
   v.onplay=function(){ syncPlay(); if(!exporting) startLoop() };
   v.onpause=function(){ syncPlay(); if(!exporting){ stopLoop(); render(); updateSeek() } };
@@ -2912,7 +2945,7 @@ function addToCollage(list){
 file.onchange=function(ev,given){
   var list=given||[].slice.call(file.files||[]); if(!list.length)return;
   plog("выбраны файлы:",list.map(function(f){ return (f.name||"?")+" ("+(f.type||"?")+", "+Math.round((f.size||0)/1024)+" КБ)"; }).join("; "));
-  if(exporting){ file.value=""; return; }
+  if(exporting||importingVideo){ file.value=""; return; }
   hideDone();
   if(isCollage()){ addToCollage(list); file.value=""; return; }
   if(isCard()) setLayout("single");
@@ -2937,17 +2970,24 @@ file.onchange=function(ev,given){
   var f=list[0];
   if(isVideoFile(f)){
     toast("Открываем видео…",2500);
-    curVideoFile=f;
-    loadVideo(f).then(function(v){
-      useVideo(v);
+    importingVideo=true;
+    var source=f;
+    loadVideo(f).catch(async function(e){
+      if(!f.size) throw e;
+      plog("браузер не открыл исходник:",e.message);
+      source=await convertVideo(f);
+      return loadVideo(source);
+    }).then(function(v){
+      curVideoFile=source;
       document.getElementById("zoom").value=100;
       document.getElementById("pickBtn").textContent="Заменить";
-      try{ render(); }
+      toastEl.classList.remove("show");
+      try{ useVideo(v); }
       catch(e){ console.error(e); toast("Видео открылось, но кадр не нарисовался: "+((e&&e.message)||e),6000); }
     },function(e){
       console.warn("Не открылось видео:",f.name,f.type,f.size,e&&e.message);
-      toast(explainVideo(f,e),7500);
-    });
+      toast(f.size?"Не удалось открыть и подготовить видео. Попробуйте MP4 с H.264 8 бит, 4:2:0 и AAC.":"Файл пустой. Сначала скачайте его на устройство.",7500);
+    }).finally(function(){ importingVideo=false; });
   }else{
     loadImage(f).then(function(i){
       useImage(i);
@@ -3056,7 +3096,7 @@ function clearMedia(){
 }
 /* Уже загруженные фото переезжают в новый макет по порядку; лишние остаются за его пределами. */
 function setLayout(id){
-  if(id===layoutId||exporting) return;
+  if(id===layoutId||exporting||importingVideo) return;
   hideDone();
   var def=LAYOUTS.filter(function(l){return l.id===id})[0], imgs=[];
   if(layoutId==="card"){
@@ -3149,7 +3189,7 @@ function saveBatch(btn){
   })();
 }
 document.getElementById("saveBtn").onclick=function(){
-  if(busy||exporting)return;
+  if(busy||exporting||importingVideo)return;
   rememberSrc();
   if(isCollage()){ if(!collageReady()) return; } else if(!photo&&!isCard()) return;
   if(isVideo&&!isCard()){ exportVideo(); return; }
@@ -3219,5 +3259,6 @@ Promise.all([
 ]).then(function(){overlayCache=null;fitStage();render()});
 })();
 </script>
+<script defer src="ffmpeg.js"></script>
 </body>
 </html>
